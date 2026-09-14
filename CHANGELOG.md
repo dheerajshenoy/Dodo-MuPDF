@@ -48,7 +48,7 @@
 
 ---
 
-## 0.7.7
+## 0.7.7 (2026-09-10)
 
 ### New Features
 
@@ -65,7 +65,7 @@
 
 ---
 
-## 0.7.6
+## 0.7.6 (2026-08-13)
 
 ### New Features
 
@@ -94,7 +94,7 @@
 
 ---
 
-## 0.7.5
+## 0.7.5 (2026-06-30)
 
 ### New Features
 
@@ -113,7 +113,7 @@
 - Fix the viewport jumping to the wrong page during Ctrl+scroll zoom in multi-page layout.
 - Fix pages disappearing off-screen after zoom in multi-page layout.
 
-## 0.7.4
+## 0.7.4 (2026-06-08)
 
 ### New Features
 
@@ -144,7 +144,7 @@
 - Fix a crash on exit caused by Lua cleanup ordering.
 - Numerous smaller internal correctness fixes across `Model`/`DocumentView`/`DocumentContainer` (colour rounding, inverted null-guards, memory leaks, crash guards around malformed PDFs).
 
-## 0.7.3
+## 0.7.3 (2026-05-20)
 
 ### New Features
 
@@ -166,7 +166,7 @@
 - Fix pickers leaking keyboard shortcuts to the document view while open.
 - Multi-line highlight annotations now render as separate quads per line instead of one box spanning the gap between them.
 
-## 0.7.2
+## 0.7.2 (2026-05-12)
 
 ### New Features
 
@@ -186,7 +186,7 @@
 - Removed the ImageMagick dependency.
 - Removed the unused `lektra.capabilities` Lua table.
 
-## 0.7.1
+## 0.7.1 (2026-05-10)
 
 ### New Features
 
@@ -220,7 +220,7 @@
 - Renamed `always_open_in_new_window` to `single_instance`.
 - Minimum C++ standard lowered to C++20 for wider compiler/platform support.
 
-## 0.7.0
+## 0.7.0 (2026-04-25)
 
 ### Features
 
@@ -254,7 +254,7 @@
 - `[statusbar]` components reorganized into their own `[statusbar.component.*]` subsections.
 - Color Dialog swatches are now configurable via `[misc].color_dialog_colors`.
 
-## 0.6.9
+## 0.6.9 (2026-04-05)
 
 ### Features
 
@@ -349,7 +349,7 @@ command_palette = [ ":", "Ctrl+P" ]
   of the codebase and to follow common C++ project structure conventions.
 - Renamed `CommandPalette.shortcuts` to `CommandPalette.show_shortcuts` for better clarity of what the option does.
 
-## 0.6.8
+## 0.6.8 (2026-03-20)
 
 ### Features
 - Add **progressive searching** for search results. When a search query is entered, the search results will start showing up immediately as they are found, instead of waiting for the entire search to complete before showing any results. **This is enabled by default**.
@@ -388,7 +388,7 @@ command_palette = [ ":", "Ctrl+P" ]
 - Make different types of Picker (e.g. outline picker, search highlights picker, recent files picker, etc.) inherit **configuration** options from the common base `Picker` class **configuration** to reduce code duplication and improve maintainability of the codebase.
 - Make the same inheriting structure for `Annotation` **configuration**
 
-## 0.6.7
+## 0.6.7 (2026-03-12)
 
 ### Features
 
@@ -416,7 +416,7 @@ command_palette = [ ":", "Ctrl+P" ]
 - Add man pages for command line usage documentation `man lektra`
 - Rename `panel` to `statusbar`
 
-## 0.6.6
+## 0.6.6 (2026-03-08)
 
 ### Features
 
@@ -474,7 +474,7 @@ backend = "auto" # "auto", "opengl", "raster"
 
 - Removed `grid` option from `[command_palette]` section of the config as it was not implemented.
 
-## 0.6.5
+## 0.6.5 (2026-03-05)
 
 ### End User Features
 
@@ -569,7 +569,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Fix layout changing at runtime not working properly
 - Fix crash due to zero image size in BOOK layout mode
 
-## 0.6.4
+## 0.6.4 (2026-02-25)
 
 ### Bug Fix
 
@@ -626,7 +626,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 
 - `startup_tab` widget is not enabled by default anymore
 
-## 0.6.3
+## 0.6.3 (2026-02-21)
 
 ### Features
 
@@ -735,7 +735,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Fix for tab title not updated when closing split
 - Fix for tab title not updated which changing current split focus
 
-## 0.6.2
+## 0.6.2 (2026-02-17)
 
 ### Features
 - Ability to create portals:
@@ -791,7 +791,7 @@ NOTE: This is just a convenience table to increase the readability of the config
     - `[ui.llm_widget]` -> `[llm_widget]`
     - `[ui.overlays]` -> `[overlays]`
 
-## 0.6.1 [Lektra Update]
+## 0.6.1 (2026-01-25) [Lektra Update]
 #### Renamed project name from `dodo` to `lektra`
 
 ### Features
@@ -815,7 +815,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Remove `close_file` command as it was redundant with `tab_close` (which does the same thing)
 - Rename `bar_position` to `location` in `[ui.tabs]`
 
-## 0.6.0
+## 0.6.0 (2026-01-21)
 
 ### Features
 
@@ -895,13 +895,13 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Fix loading default config when error is found in config
 - Fix highlights search overlay hiding after selecting entry
 
-## 0.5.6
+## 0.5.6 (2026-01-16)
 
 ### Bug Fixes
 
 - Fix dodo not compiling without synctex
 
-## 0.5.5
+## 0.5.5 (2026-01-15)
 
 ### Features
 
@@ -925,7 +925,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Fix rect annotation creation
 - Fix popup annotation creation
 
-## 0.5.4
+## 0.5.4 (2026-01-12)
 
 ### Features
 
@@ -972,7 +972,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Fix config color parsing to treat 8-digit hex values as RGBA
 - Add orderless, space-aware command palette search
 
-## 0.5.3
+## 0.5.3 (2026-01-09)
 
 
 ### Features
@@ -1012,7 +1012,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Show information if no outline is present in the document instead of empty outline panel
 - Fix crash when rendering link/annotation items from background threads
 
-## 0.5.2
+## 0.5.2 (2026-01-05)
 
 - Add runtime layout switching
 - Link hinting mode for keyboard link navigation
@@ -1098,7 +1098,7 @@ NOTE: This is just a convenience table to increase the readability of the config
 - Merge highlight annotations on overlapping areas
 
 
-## 0.4.1
+## 0.4.1 (2025-12-16)
 - Remove padding around the document view
 - Fix installation script
 - Fix build issues
