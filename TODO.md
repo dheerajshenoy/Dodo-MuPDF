@@ -5,6 +5,7 @@
 ## HIGH PRIORITY
 
 - [ ] Fix page shifting when zooming in/out
+- [ ] EPUB reflow
 - [ ] Text reflow for MuPDF documents
 - [ ] Tab detach drag and drop to new window spawns new useless window
 
@@ -12,7 +13,6 @@
 
 - [ ] Decorate form fields
 - [ ] Trim margins
-- [ ] Smart Jump
 - [ ] Add support for directory local config files
 - [ ] Allow for command arguments
 - [ ] Don't add connection to annotation when in non-annotatable mode
