@@ -2824,7 +2824,15 @@ Model::generateOutline(float min_ratio, int max_levels) noexcept
 
                 fz_outline *node = fz_new_outline(m_ctx);
                 node->title      = fz_strdup(m_ctx, title.c_str());
-                node->page       = fz_make_location(0, pageno);
+                // Use the real chapter-aware location, not fz_make_location(0,
+                // pageno) — for chaptered formats (EPUB, and anything else
+                // MuPDF splits into multiple fz_document chapters) `pageno`
+                // here is a GLOBAL page index, but chapter 0 alone may not
+                // contain that many pages; fz_location_from_page_number()
+                // resolves it to the correct {chapter, local page} pair so
+                // every consumer can uniformly call
+                // fz_page_number_from_location() to get the global index back.
+                node->page = fz_location_from_page_number(m_ctx, m_doc, pageno);
                 node->x          = line->first_char->origin.x;
                 node->y          = line->first_char->origin.y;
                 node->is_open    = 1;
@@ -2842,25 +2850,46 @@ Model::generateOutline(float min_ratio, int max_levels) noexcept
 
 // --- Outline file I/O ---
 
+// `doc` resolves each node's chapter-aware fz_location to a single global
+// page index for the JSON output — reading node->page.page directly would
+// give the wrong (chapter-local) number for any chaptered format (EPUB).
+// `doc` may be null (DjVu, which has no fz_document / chapter concept at
+// all); in that case node->page.page is already the correct global index,
+// so resolution is skipped rather than risking a null-doc MuPDF call.
 static QJsonArray
-outline_to_json(fz_outline *node) noexcept
+outline_to_json(fz_context *ctx, fz_document *doc, fz_outline *node) noexcept
 {
     QJsonArray arr;
     for (; node; node = node->next)
     {
+        // EPUB's outline loader leaves node->page as the sentinel {-1,-1}
+        // (and x/y unset), expecting the destination to be resolved from
+        // node->uri via fz_resolve_link() — mirrors
+        // Model::resolveOutlineNode().
+        fz_location loc = node->page;
+        float       x = node->x, y = node->y;
+        if (loc.chapter < 0 && doc && node->uri)
+            loc = fz_resolve_link(ctx, doc, node->uri, &x, &y);
+        const int pageno = doc ? fz_page_number_from_location(ctx, doc, loc)
+                               : loc.page;
         QJsonObject obj;
         obj["title"]    = node->title ? QString::fromUtf8(node->title) : QString();
-        obj["page"]     = node->page.page + 1; // store as 1-based
-        obj["x"]        = (double)node->x;
-        obj["y"]        = (double)node->y;
-        obj["children"] = outline_to_json(node->down);
+        obj["page"]     = pageno + 1; // store as 1-based
+        obj["x"]        = (double)x;
+        obj["y"]        = (double)y;
+        obj["children"] = outline_to_json(ctx, doc, node->down);
         arr.append(obj);
     }
     return arr;
 }
 
+// `doc` converts each entry's stored GLOBAL page index back into the
+// correct chapter-aware fz_location, so loaded entries behave identically
+// to real embedded-outline entries (both resolve correctly via
+// fz_page_number_from_location() at every consumption site).
 static fz_outline *
-json_to_outline(fz_context *ctx, const QJsonArray &arr) noexcept
+json_to_outline(fz_context *ctx, fz_document *doc,
+                const QJsonArray &arr) noexcept
 {
     fz_outline *root  = nullptr;
     fz_outline **tail = &root;
@@ -2872,12 +2901,15 @@ json_to_outline(fz_context *ctx, const QJsonArray &arr) noexcept
         fz_outline *node      = fz_new_outline(ctx);
         const QString title   = obj["title"].toString();
         node->title           = fz_strdup(ctx, title.toUtf8().constData());
-        node->page            = fz_make_location(0, obj["page"].toInt(1) - 1);
+        const int storedPage  = obj["page"].toInt(1) - 1;
+        node->page            = doc ? fz_location_from_page_number(ctx, doc,
+                                                                  storedPage)
+                                     : fz_make_location(0, storedPage);
         node->x               = (float)obj["x"].toDouble();
         node->y               = (float)obj["y"].toDouble();
         node->is_open         = 1;
         if (obj.contains("children") && obj["children"].isArray())
-            node->down = json_to_outline(ctx, obj["children"].toArray());
+            node->down = json_to_outline(ctx, doc, obj["children"].toArray());
         *tail = node;
         tail  = &node->next;
     }
@@ -2887,12 +2919,16 @@ json_to_outline(fz_context *ctx, const QJsonArray &arr) noexcept
 bool
 Model::exportOutlineToFile(const QString &path, fz_outline *outline) noexcept
 {
-    if (!outline)
+    // m_doc is null for DjVu (it uses the separate DjVuLib API, not MuPDF's
+    // fz_document) — outline_to_json() handles a null doc by treating
+    // node->page.page as already-global (correct for DjVu, which has no
+    // chapter concept), so don't require m_doc here.
+    if (!outline || !m_ctx)
         return false;
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
-    const QJsonDocument doc(outline_to_json(outline));
+    const QJsonDocument doc(outline_to_json(m_ctx, m_doc, outline));
     file.write(doc.toJson(QJsonDocument::Indented));
     return true;
 }
@@ -2909,7 +2945,7 @@ Model::loadOutlineFromFile(const QString &path) noexcept
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &err);
     if (err.error != QJsonParseError::NoError || !doc.isArray())
         return nullptr;
-    fz_outline *root = json_to_outline(m_ctx, doc.array());
+    fz_outline *root = json_to_outline(m_ctx, m_doc, doc.array());
     fz_drop_outline(m_ctx, m_generated_outline);
     m_generated_outline = root;
     return m_generated_outline;

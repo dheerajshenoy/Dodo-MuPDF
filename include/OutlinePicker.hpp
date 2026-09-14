@@ -3,6 +3,8 @@
 #include "Config.hpp"
 #include "Picker.hpp"
 
+class Model;
+
 extern "C"
 {
 #include <mupdf/fitz.h>
@@ -17,8 +19,12 @@ public:
     explicit OutlinePicker(const Config::Outline &config,
                            QWidget *parent) noexcept;
 
-    // Call this whenever a new document is loaded
-    void setOutline(fz_outline *outline) noexcept;
+    // Call this whenever a new document is loaded. `model` resolves each
+    // node's chapter-aware fz_location to a global page index — required
+    // for chaptered formats (EPUB) where a node's local page-within-chapter
+    // number is not the document-wide index. Pass the current document's
+    // Model whenever one is available.
+    void setOutline(fz_outline *outline, Model *model = nullptr) noexcept;
     void clearOutline() noexcept;
 
     bool hasOutline() const noexcept
@@ -50,7 +56,7 @@ private:
         bool isHeading; // has children
     };
 
-    void harvest(fz_outline *node, int depth) noexcept;
+    void harvest(fz_outline *node, int depth, Model *model) noexcept;
 
     std::vector<OutlineEntry> m_entries;
     const Config::Outline &m_config;

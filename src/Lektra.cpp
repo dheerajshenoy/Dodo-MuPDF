@@ -3394,7 +3394,7 @@ Lektra::ShowOutline() noexcept
         });
     }
 
-    m_outline_picker->setOutline(outline);
+    m_outline_picker->setOutline(outline, m_doc->model());
 
     if (m_outline_picker->hasOutline())
     {
@@ -3444,7 +3444,7 @@ Lektra::GenerateOutline() noexcept
         });
     }
 
-    m_outline_picker->setOutline(outline);
+    m_outline_picker->setOutline(outline, m_doc->model());
 
     if (m_outline_picker->hasOutline())
     {
@@ -3518,7 +3518,7 @@ Lektra::LoadOutline() noexcept
         });
     }
 
-    m_outline_picker->setOutline(outline);
+    m_outline_picker->setOutline(outline, m_doc->model());
 
     if (m_outline_picker->hasOutline())
     {
@@ -3742,12 +3742,13 @@ Lektra::NarrowToSection(const QStringList &args) noexcept
     {
         for (fz_outline *n = node; n; n = n->next)
         {
-            if (n->page.page >= 0)
+            const int pageno = m_doc->model()->resolveOutlineNode(n);
+            if (pageno >= 0)
             {
                 Section s;
                 s.title      = QString(n->title ? n->title : "").simplified();
                 s.depth      = depth;
-                s.startPage0 = n->page.page;
+                s.startPage0 = pageno;
                 s.endPage0   = -1;
                 sections.append(s);
             }

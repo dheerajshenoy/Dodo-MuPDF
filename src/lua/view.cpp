@@ -1,4 +1,5 @@
 #include "Lektra.hpp"
+#include "Model.hpp"
 #include "utils.hpp"
 
 #include <QMenu>
@@ -8,7 +9,7 @@ namespace
 {
 
 static void
-push_outline_nodes(lua_State *L, fz_outline *node)
+push_outline_nodes(lua_State *L, fz_outline *node, Model *model)
 {
     lua_newtable(L);
     int idx = 1;
@@ -19,20 +20,28 @@ push_outline_nodes(lua_State *L, fz_outline *node)
         lua_pushstring(L, n->title ? n->title : "");
         lua_setfield(L, -2, "title");
 
-        // page.page is 0-based; -1 means external/no destination
-        if (n->page.page >= 0)
-            lua_pushinteger(L, n->page.page + 1);
+        // Resolve via the Model rather than reading n->page.page
+        // directly: for chaptered formats (EPUB) that number is only
+        // the local page within n->page.chapter, and EPUB additionally
+        // leaves n->page/x/y unresolved (sentinel {-1,-1}), requiring
+        // resolution from n->uri.
+        float     x = n->x, y = n->y;
+        const int pageno = model ? model->resolveOutlineNode(n, &x, &y)
+                                 : n->page.page;
+        if (pageno >= 0)
+            lua_pushinteger(L, pageno + 1);
         else
             lua_pushnil(L);
         lua_setfield(L, -2, "pageno");
 
-        lua_pushnumber(L, n->x);
+        lua_pushnumber(L, x);
         lua_setfield(L, -2, "x");
 
-        lua_pushnumber(L, n->y);
+        lua_pushnumber(L, y);
         lua_setfield(L, -2, "y");
 
-        push_outline_nodes(L, n->down); // empty table when n->down == nullptr
+        push_outline_nodes(L, n->down,
+                           model); // empty table when n->down == nullptr
         lua_setfield(L, -2, "children");
 
         lua_rawseti(L, -2, idx);
@@ -1029,7 +1038,7 @@ static const luaL_Reg DocumentViewMethods[] = {
                     if (*view)
                     {
                         fz_outline *outline = (*view)->model()->getOutline();
-                        push_outline_nodes(L, outline);
+                        push_outline_nodes(L, outline, (*view)->model());
                     }
                     else
                     {

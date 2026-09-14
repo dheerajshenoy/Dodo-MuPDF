@@ -1,5 +1,7 @@
 #include "OutlinePicker.hpp"
 
+#include "Model.hpp"
+
 OutlinePicker::OutlinePicker(const Config::Outline &config,
                              QWidget *parent) noexcept
     : Picker(config, parent), m_config(config)
@@ -24,11 +26,11 @@ OutlinePicker::OutlinePicker(const Config::Outline &config,
 }
 
 void
-OutlinePicker::setOutline(fz_outline *outline) noexcept
+OutlinePicker::setOutline(fz_outline *outline, Model *model) noexcept
 {
     m_entries.clear();
     if (outline)
-        harvest(outline, 0);
+        harvest(outline, 0, model);
 }
 
 void
@@ -38,7 +40,7 @@ OutlinePicker::clearOutline() noexcept
 }
 
 void
-OutlinePicker::harvest(fz_outline *node, int depth) noexcept
+OutlinePicker::harvest(fz_outline *node, int depth, Model *model) noexcept
 {
     for (fz_outline *n = node; n; n = n->next)
     {
@@ -50,15 +52,24 @@ OutlinePicker::harvest(fz_outline *node, int depth) noexcept
                   .remove(QChar(0xFFFD))
                   .trimmed();
 
+        // n->page.page alone is only the LOCAL page-within-chapter number
+        // for chaptered formats (EPUB) — must resolve via the Model to get
+        // the document-wide page index. EPUB nodes additionally leave
+        // n->page/x/y unresolved (sentinel {-1,-1}) and only carry a
+        // uri, which resolveOutlineNode() also handles.
+        float     x = n->x, y = n->y;
+        const int pageno
+            = model ? model->resolveOutlineNode(n, &x, &y) : n->page.page;
+
         m_entries.push_back({
             .title     = title,
             .depth     = depth,
-            .page      = n->page.page,
-            .location  = QPointF(n->x, n->y),
+            .page      = pageno,
+            .location  = QPointF(x, y),
             .isHeading = (n->down != nullptr),
         });
         if (n->down)
-            harvest(n->down, depth + 1);
+            harvest(n->down, depth + 1, model);
     }
 }
 

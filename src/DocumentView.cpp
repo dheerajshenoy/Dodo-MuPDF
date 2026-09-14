@@ -5750,9 +5750,10 @@ DocumentView::NarrowToSectionByTitle(const QString &title) noexcept
     {
         for (fz_outline *n = node; n; n = n->next)
         {
-            if (n->page.page >= 0)
+            const int pageno = m_model->resolveOutlineNode(n);
+            if (pageno >= 0)
                 sections.append({QString(n->title ? n->title : "").simplified(),
-                                 depth, n->page.page, -1});
+                                 depth, pageno, -1});
             if (n->down)
                 harvest(n->down, depth + 1);
         }

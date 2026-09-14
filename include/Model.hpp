@@ -432,6 +432,49 @@ public:
     fz_outline *generateOutline(float min_ratio, int max_levels) noexcept;
     bool exportOutlineToFile(const QString &path, fz_outline *outline) noexcept;
     fz_outline *loadOutlineFromFile(const QString &path) noexcept;
+
+    // Resolve an outline node's chapter-aware fz_location to a single
+    // global (0-based) page index. Every fz_outline consumer must go
+    // through this rather than reading loc.page directly — for chaptered
+    // formats (EPUB) loc.page is only the LOCAL page number within
+    // loc.chapter, not the document-wide index. Falls back to loc.page
+    // unresolved when m_doc is null (DjVu, which has no fz_document /
+    // chapter concept), matching how generated/loaded synthetic outline
+    // entries already encode a plain global index in that case.
+    [[nodiscard]] inline int pageNumberFromLocation(fz_location loc)
+        const noexcept
+    {
+        if (!m_ctx || !m_doc)
+            return loc.page;
+        return fz_page_number_from_location(m_ctx, m_doc, loc);
+    }
+
+    // Resolve an fz_outline node's actual target: document-wide (0-based)
+    // page index, with the in-page x/y position written to *x/*y when
+    // given. For most formats (PDF, XPS, FB2, MOBI) MuPDF already
+    // resolves node->page/x/y while loading the outline. EPUB's loader
+    // does NOT: it leaves node->page as the sentinel {-1, -1} and x/y
+    // unset, expecting the caller to resolve the destination from
+    // node->uri via fz_resolve_link() (this is how MuPDF's own reference
+    // viewers, e.g. platform/gl, do it). This method handles both cases
+    // uniformly so every consumer gets a correct global page index
+    // regardless of format.
+    [[nodiscard]] inline int resolveOutlineNode(fz_outline *node, float *x = nullptr,
+                                                float *y = nullptr) const noexcept
+    {
+        if (!m_ctx || !node)
+            return -1;
+        fz_location loc = node->page;
+        float       lx = node->x, ly = node->y;
+        if (loc.chapter < 0 && m_doc && node->uri)
+            loc = fz_resolve_link(m_ctx, m_doc, node->uri, &lx, &ly);
+        if (x)
+            *x = lx;
+        if (y)
+            *y = ly;
+        return pageNumberFromLocation(loc);
+    }
+
     void cancelOpen() noexcept;
     QFuture<void> openAsync(const QString &filePath) noexcept;
 
