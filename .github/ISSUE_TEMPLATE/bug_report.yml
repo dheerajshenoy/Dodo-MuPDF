@@ -20,6 +20,17 @@ body:
         - label: I have searched existing issues for duplicates.
           required: true
 
+  - type: dropdown
+    id: application_type
+    attributes:
+      label: Application type
+      description: Select the type of application you are reporting a bug for.
+      options:
+        - Native application
+        - AppImage
+    validations:
+      required: true
+
   - type: checkboxes
     id: configuration_used
     attributes:
