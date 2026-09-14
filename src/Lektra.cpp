@@ -2513,6 +2513,29 @@ Lektra::ZoomIn() noexcept
         m_doc->ZoomIn();
 }
 
+// Increase EPUB/FB2/MOBI text size — reflows the document, unlike ZoomIn
+// which is pure raster scaling.
+void
+Lektra::ReflowFontSizeIncrease() noexcept
+{
+    if (m_doc)
+        m_doc->ReflowFontSizeIncrease();
+}
+
+void
+Lektra::ReflowFontSizeDecrease() noexcept
+{
+    if (m_doc)
+        m_doc->ReflowFontSizeDecrease();
+}
+
+void
+Lektra::ReflowFontSizeReset() noexcept
+{
+    if (m_doc)
+        m_doc->ReflowFontSizeReset();
+}
+
 void
 Lektra::Zoom_set(const QStringList &args) noexcept
 {
@@ -5329,6 +5352,18 @@ Lektra::initCommands() noexcept
                            [this](const QStringList &) { ZoomReset(); });
     m_command_manager->reg("zoom_set", tr("Set zoom to a specific level"),
                            [this](const QStringList &args) { Zoom_set(args); });
+
+    // Reflow text size (EPUB/FB2/MOBI only) — re-paginates the document,
+    // unlike zoom_in/zoom_out which are pure raster scaling.
+    m_command_manager->reg(
+        "font_size_increase", tr("Increase text size (reflowable documents)"),
+        [this](const QStringList &) { ReflowFontSizeIncrease(); });
+    m_command_manager->reg(
+        "font_size_decrease", tr("Decrease text size (reflowable documents)"),
+        [this](const QStringList &) { ReflowFontSizeDecrease(); });
+    m_command_manager->reg(
+        "font_size_reset", tr("Reset text size to default (reflowable documents)"),
+        [this](const QStringList &) { ReflowFontSizeReset(); });
 
     // Splits
     m_command_manager->reg("split_horizontal", tr("Split view horizontally"),

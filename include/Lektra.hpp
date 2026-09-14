@@ -187,6 +187,9 @@ public:
     void ZoomReset() noexcept;
     void ZoomIn() noexcept;
     void ZoomOut() noexcept;
+    void ReflowFontSizeIncrease() noexcept;
+    void ReflowFontSizeDecrease() noexcept;
+    void ReflowFontSizeReset() noexcept;
     void Zoom_set(const QStringList &args = {}) noexcept;
     void Goto_page(const QStringList &args = {}) noexcept;
     void GotoLocation(int pageno, float x, float y) noexcept;

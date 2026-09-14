@@ -56,6 +56,13 @@ static constexpr int ZVALUE_TEXT_SELECTION  = 30;
 static constexpr double MIN_ZOOM_FACTOR = 0.01;
 static constexpr double MAX_ZOOM_FACTOR = 100.0;
 
+// Bounds/step/default for ReflowFontSizeIncrease()/Decrease(), in points
+// (MuPDF's layout_em). 11pt is FZ_DEFAULT_LAYOUT_EM.
+static constexpr float kReflowFontSizeMin     = 6.0f;
+static constexpr float kReflowFontSizeMax     = 36.0f;
+static constexpr float kReflowFontSizeStep    = 1.0f;
+static constexpr float kReflowFontSizeDefault = 11.0f;
+
 struct Config;
 class DocumentContainer;
 class QMenu;
@@ -430,6 +437,14 @@ public:
     void ZoomIn() noexcept;
     void ZoomOut() noexcept;
     void ZoomReset() noexcept;
+
+    // Text-size commands for reflowable documents (EPUB/FB2/MOBI): drive
+    // MuPDF's layout_em, which actually re-paginates the document (more
+    // text per page = fewer pages), unlike ZoomIn/ZoomOut which stay pure
+    // raster scaling. No-op when Model::supports_reflow() is false.
+    void ReflowFontSizeIncrease() noexcept;
+    void ReflowFontSizeDecrease() noexcept;
+    void ReflowFontSizeReset() noexcept;
     void NextHit() noexcept;
     void PrevHit() noexcept;
     void GotoHit(int index) noexcept;
@@ -543,6 +558,7 @@ private slots:
     void handleReloadRequested(int pageno = -1) noexcept;
     void handleReloadPasswordRequired() noexcept;
     void handleDeferredResize() noexcept;
+    void handleDocumentRelayouted() noexcept;
 
 #ifdef WITH_SYNCTEX
     void handleSynctexJumpRequested(QPointF scenePos) noexcept;
@@ -623,6 +639,14 @@ private:
     void repositionPages();
     void cachePageStride() noexcept;
     void updateSceneRect() noexcept;
+    // For reflowable documents (EPUB/FB2/MOBI), re-paginate to the current
+    // viewport size at the given font size (layout_em) — saving the
+    // current reading position as a fraction (m_relayout_saved_fraction)
+    // so handleDocumentRelayouted() can restore roughly the same place
+    // once the new pagination is live. Only called from
+    // ReflowFontSizeIncrease()/Decrease(); no-op for non-reflowable
+    // formats (Model::supports_reflow() gates it).
+    void applyReflow(float em) noexcept;
     void initConnections() noexcept;
     void resetConnections() noexcept;
     QGraphicsPathItem *ensureSearchItemForPage(int pageno) noexcept;
@@ -672,6 +696,15 @@ private:
     JumpMarker *m_jump_marker                 = nullptr;
     QTimer *m_scroll_page_update_timer        = nullptr;
     QTimer *m_resize_timer                    = nullptr;
+    // Reading position (as a fraction of the page count) saved just before
+    // Model::relayoutForViewport() is kicked off, consumed by
+    // handleDocumentRelayouted() to restore roughly the same place under
+    // the new pagination. See applyReflow().
+    double m_relayout_saved_fraction          = 0.0;
+    // Current font size (layout_em, points) for reflowable documents; only
+    // meaningful once ReflowFontSizeIncrease()/Decrease() has been called
+    // at least once. Reset to the default on every new document open.
+    float m_reflow_em                         = kReflowFontSizeDefault;
     PageLocation m_pending_jump               = {-1, 0, 0};
     int m_search_index                        = -1;
     SearchScope m_search_scope                = SearchScope::All;

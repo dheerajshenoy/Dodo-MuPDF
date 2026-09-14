@@ -212,6 +212,17 @@ public:
                || m_filetype == FileType::DJVU || m_filetype == FileType::MOBI;
     }
 
+    // True for HTML-backed formats whose pagination MuPDF computes by
+    // actually reflowing text into a page box of a given size
+    // (fz_layout_document). XPS is chaptered the same way EPUB is but is
+    // a fixed-layout format — its pages are not reflowable — so it is
+    // deliberately excluded here.
+    [[nodiscard]] inline bool supports_reflow() const noexcept
+    {
+        return m_filetype == FileType::EPUB || m_filetype == FileType::FB2
+               || m_filetype == FileType::MOBI;
+    }
+
     [[nodiscard]] inline bool supports_annotations() const noexcept
     {
         return m_filetype == FileType::PDF;
@@ -475,6 +486,32 @@ public:
         return pageNumberFromLocation(loc);
     }
 
+    // Re-paginate a reflowable document (EPUB/FB2/MOBI) to fit a page box
+    // of the given size in points, e.g. following a viewport resize. No-op
+    // for formats where supports_reflow() is false, or when (w, h, em)
+    // match the last-applied layout (fz_layout_document + the page-count
+    // recompute it forces is real work, proportional to chapter count —
+    // don't repeat it for a no-change resize tick). Runs the MuPDF work
+    // off the calling thread; emits documentRelayouted() once the new
+    // page count / dimensions are live. See TODO.md for the known
+    // limitation this introduces for PageLocation-based bookmarks/history.
+    QFuture<void> relayoutForViewport(float widthPts, float heightPts,
+                                      float emPts) noexcept;
+
+    // Current reflow page-box size in points — the last size passed to
+    // relayoutForViewport(), or MuPDF's own default (FZ_DEFAULT_LAYOUT_W/H,
+    // 420x595) when the document hasn't been laid out yet. Font-size
+    // commands should reuse these rather than deriving a size from the
+    // viewport, so changing text size does not also change the page size.
+    [[nodiscard]] inline float layoutWidthPts() const noexcept
+    {
+        return m_layout_w > 0.0f ? m_layout_w : float(FZ_DEFAULT_LAYOUT_W);
+    }
+    [[nodiscard]] inline float layoutHeightPts() const noexcept
+    {
+        return m_layout_h > 0.0f ? m_layout_h : float(FZ_DEFAULT_LAYOUT_H);
+    }
+
     void cancelOpen() noexcept;
     QFuture<void> openAsync(const QString &filePath) noexcept;
 
@@ -545,6 +582,7 @@ signals:
     void reloadPasswordRequired();
     void openFileFailed();
     void openFileFinished();
+    void documentRelayouted();
     void reloadRequested(int pageno);
     void
     searchResultsReady(const QMap<int, std::vector<Model::SearchHit>> &results);
@@ -794,6 +832,12 @@ private:
     fz_colorspace *m_colorspace = nullptr;
     fz_outline *m_outline           = nullptr;
     fz_outline *m_generated_outline = nullptr;
+
+    // Last (widthPts, heightPts, emPts) applied via relayoutForViewport(),
+    // so an unchanged viewport size doesn't trigger a redundant
+    // fz_layout_document + page-count recompute. 0 means "never laid out"
+    // (still at fz_open_document's default layout).
+    float m_layout_w = 0.0f, m_layout_h = 0.0f, m_layout_em = 0.0f;
 
     void *m_ddjvu_ctx = nullptr;
     void *m_ddjvu_doc = nullptr;

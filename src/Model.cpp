@@ -1471,6 +1471,13 @@ Model::cleanup_mupdf() noexcept
     m_doc     = nullptr;
     m_pdf_doc = nullptr;
 
+    // m_layout_w/h/em are per-document layout state tracked purely to
+    // skip a redundant fz_layout_document call in relayoutForViewport();
+    // must reset on document swap or a freshly opened document could
+    // spuriously match the previous document's last-applied layout size
+    // and skip being laid out at all.
+    m_layout_w = m_layout_h = m_layout_em = 0.0f;
+
     {
         std::lock_guard<std::recursive_mutex> lock(m_page_cache_mutex);
         m_page_lru_cache.clear();
@@ -2028,6 +2035,105 @@ Model::_continueOpen(fz_context *ctx, fz_document *doc) noexcept
 
         emit openFileFinished();
     }, Qt::QueuedConnection);
+}
+
+QFuture<void>
+Model::relayoutForViewport(float widthPts, float heightPts,
+                           float emPts) noexcept
+{
+    if (!supports_reflow() || !m_doc)
+        return QtConcurrent::run([] {});
+
+    if (widthPts <= 0 || heightPts <= 0 || emPts <= 0)
+        return QtConcurrent::run([] {});
+
+    // Nothing changed since the last relayout (or since open, which left
+    // the document at MuPDF's built-in default) — fz_layout_document
+    // forces a page-count recompute that lays out every chapter's HTML to
+    // count its pages, so skip repeating that for a no-op resize tick.
+    if (widthPts == m_layout_w && heightPts == m_layout_h
+        && emPts == m_layout_em)
+        return QtConcurrent::run([] {});
+
+    fz_context *ctx = cloneContext();
+    if (!ctx)
+        return QtConcurrent::run([] {});
+
+    return QtConcurrent::run([this, ctx, widthPts, heightPts, emPts]
+    {
+        int page_count = 0;
+        float w = 0, h = 0;
+        bool ok = true;
+
+        std::lock_guard<std::mutex> lock(m_doc_mutex);
+
+        fz_try(ctx)
+        {
+            fz_layout_document(ctx, m_doc, widthPts, heightPts, emPts);
+            page_count = fz_count_pages(ctx, m_doc);
+            if (page_count > 0)
+            {
+                fz_page *p = fz_load_page(ctx, m_doc, 0);
+                fz_rect r  = fz_bound_page(ctx, p);
+                fz_drop_page(ctx, p);
+                w = r.x1 - r.x0;
+                h = r.y1 - r.y0;
+            }
+        }
+        fz_catch(ctx)
+        {
+            ok = false;
+        }
+        fz_drop_context(ctx);
+
+        if (!ok)
+            return;
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, widthPts, heightPts, emPts, page_count, w, h]
+        {
+            waitForPendingRenders();
+            m_render_cancelled.store(false, std::memory_order_release);
+
+            m_layout_w  = widthPts;
+            m_layout_h  = heightPts;
+            m_layout_em = emPts;
+            m_page_count = page_count;
+
+            {
+                std::lock_guard<std::recursive_mutex> lk(m_page_cache_mutex);
+                m_page_lru_cache.clear();
+                m_text_cache.clear();
+                m_stext_page_cache.clear();
+            }
+            {
+                std::lock_guard<std::mutex> lk(m_page_dim_mutex);
+                m_default_page_dim = {w, h};
+                m_page_dim_cache.dimensions.assign(page_count,
+                                                   m_default_page_dim);
+                m_page_dim_cache.known.assign(page_count, 0);
+                if (page_count > 0)
+                    m_page_dim_cache.known[0] = true;
+            }
+            {
+                std::lock_guard<std::mutex> lk(m_content_bbox_mutex);
+                m_content_bbox_cache.clear();
+            }
+
+            // The embedded outline (m_outline) resolves each node's page
+            // live via resolveOutlineNode() -> fz_resolve_link() on every
+            // use, so it self-corrects for free. The generated outline
+            // bakes in a resolved fz_location at generation time
+            // (generateOutline() -> fz_location_from_page_number()), which
+            // is now stale — drop it so it lazily regenerates next use.
+            fz_drop_outline(m_ctx, m_generated_outline);
+            m_generated_outline = nullptr;
+
+            emit documentRelayouted();
+        },
+            Qt::QueuedConnection);
+    });
 }
 
 void

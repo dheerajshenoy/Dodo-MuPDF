@@ -396,6 +396,13 @@ DocumentView::handleOpenFileFinished() noexcept
             renderPages();
         });
 
+        // Reflowable documents (EPUB/FB2/MOBI) start at MuPDF's built-in
+        // default layout (420x595pt @ 11pt em) until the user explicitly
+        // asks for a different font size via
+        // ReflowFontSizeIncrease()/Decrease() — reflow is opt-in, not
+        // automatic.
+        m_reflow_em = kReflowFontSizeDefault;
+
 #ifdef WITH_SYNCTEX
         if (m_model->fileType() == Model::FileType::PDF)
         {
@@ -548,6 +555,9 @@ DocumentView::initConnections() noexcept
 
     connect(m_model, &Model::reloadPasswordRequired, this,
             &DocumentView::handleReloadPasswordRequired, Qt::UniqueConnection);
+
+    connect(m_model, &Model::documentRelayouted, this,
+            &DocumentView::handleDocumentRelayouted, Qt::UniqueConnection);
 
     if (m_layout_mode == LayoutMode::HORIZONTAL)
     {
@@ -3875,6 +3885,88 @@ DocumentView::handleDeferredResize() noexcept
         setFitMode(m_fit_mode);
         fitModeChanged(m_fit_mode);
     }
+}
+
+// Re-paginate a reflowable document (EPUB/FB2/MOBI) at the given font
+// size (layout_em, in points), saving the current reading position as a
+// fraction so handleDocumentRelayouted() can restore roughly the same
+// place once the new pagination is live. Only called explicitly, from
+// ReflowFontSizeIncrease()/Decrease() — not wired to resize or
+// document-open, so a document's pagination never changes underneath the
+// user without them asking for it. Deliberately keeps the page box size
+// (width/height) exactly as it currently is — Model::layoutWidthPts()/
+// layoutHeightPts() — so changing text size never also changes the page
+// size; only em varies.
+void
+DocumentView::applyReflow(float em) noexcept
+{
+    if (!m_model || !m_model->supports_reflow())
+        return;
+
+    const int pageCount = m_model->numPages();
+    m_relayout_saved_fraction
+        = pageCount > 0 ? double(m_pageno) / double(pageCount) : 0.0;
+
+    m_model->relayoutForViewport(m_model->layoutWidthPts(),
+                                 m_model->layoutHeightPts(), em);
+}
+
+void
+DocumentView::ReflowFontSizeIncrease() noexcept
+{
+    if (!m_model || !m_model->supports_reflow())
+        return;
+
+    m_reflow_em = std::clamp(m_reflow_em + kReflowFontSizeStep,
+                             kReflowFontSizeMin, kReflowFontSizeMax);
+    applyReflow(m_reflow_em);
+}
+
+void
+DocumentView::ReflowFontSizeDecrease() noexcept
+{
+    if (!m_model || !m_model->supports_reflow())
+        return;
+
+    m_reflow_em = std::clamp(m_reflow_em - kReflowFontSizeStep,
+                             kReflowFontSizeMin, kReflowFontSizeMax);
+    applyReflow(m_reflow_em);
+}
+
+void
+DocumentView::ReflowFontSizeReset() noexcept
+{
+    if (!m_model || !m_model->supports_reflow())
+        return;
+
+    m_reflow_em = kReflowFontSizeDefault;
+    applyReflow(m_reflow_em);
+}
+
+void
+DocumentView::handleDocumentRelayouted() noexcept
+{
+    const int newPageCount = m_model->numPages();
+    const int targetPage
+        = newPageCount > 0
+            ? qBound(0, qRound(m_relayout_saved_fraction * newPageCount),
+                    newPageCount - 1)
+            : 0;
+
+    m_vscroll->blockSignals(true);
+    m_hscroll->blockSignals(true);
+
+    clearDocumentItems();
+    invalidateVisiblePagesCache();
+    cachePageStride();
+    updateSceneRect();
+
+    m_vscroll->blockSignals(false);
+    m_hscroll->blockSignals(false);
+
+    m_pageno = -1; // force GotoPage to actually move under the new layout
+    GotoPage(targetPage);
+    renderPages();
 }
 
 void
