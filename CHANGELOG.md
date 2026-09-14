@@ -4,52 +4,47 @@
 
 ### New Features
 
-- **Text reflow for EPUB/FB2/MOBI, exposed as explicit font-size commands.** These formats are HTML-backed and MuPDF paginates them by actually laying text out into a page box of a given size (`fz_layout_document(w, h, em)`) — but Lektra never called it, so every reflowable document opened at MuPDF's compiled-in default page box (420×595pt @ 11pt em, `FZ_DEFAULT_LAYOUT_W/H/EM`) and stayed there for the life of the session, regardless of window size. New `Model::relayoutForViewport(widthPts, heightPts, emPts)` (`src/Model.cpp`) now drives `fz_layout_document` on demand: it's a no-op unless `Model::supports_reflow()` (EPUB/FB2/MOBI — XPS is chaptered the same way but is a fixed-layout format, deliberately excluded) and skips the call entirely if the requested size already matches what's currently applied, since a relayout forces MuPDF to re-lay-out every chapter's HTML just to recount its pages — real work, proportional to chapter count, not worth repeating for a no-op call. The actual MuPDF work runs off the UI thread (`QtConcurrent::run` + a cloned `fz_context`, same pattern `openAsync_mupdf` already uses) under `m_doc_mutex`, then posts back to apply the new page count/dimensions, clear the page/text/stext/content-bbox caches, and drop the *generated* outline (`m_generated_outline` bakes in a resolved `fz_location` at generation time via `fz_location_from_page_number()`, which goes stale across a relayout — it's cleared so it lazily regenerates next use). The *embedded* outline needs no such handling: since it resolves each node's page live via `Model::resolveOutlineNode()` on every use rather than caching a resolved index, it self-corrects across a relayout for free. New `Model::layoutWidthPts()` / `layoutHeightPts()` expose the current page-box size (falling back to the MuPDF default when the document hasn't been laid out yet) so callers can hold it fixed. Three new commands — `font_size_increase`, `font_size_decrease`, `font_size_reset` (`Lektra::ReflowFontSize{Increase,Decrease,Reset}()` → `DocumentView`, no default keybinding, bind them yourself e.g. `font_size_increase = "Ctrl+Shift+="`) — step `layout_em` by 1pt between 6pt and 36pt (default 11pt) while deliberately holding the page box at `layoutWidthPts()`/`layoutHeightPts()`, i.e. **unchanged** — so adjusting text size re-paginates the document (more/less text per page, real reflow) without ever changing the page dimensions themselves. This is distinct from, and independent of, `zoom_in`/`zoom_out`, which remain pure raster scaling for every format including these three — MuPDF re-renders any layout crisply at any DPI, so there was no need to conflate "zoom" with "text size." Reflow is strictly opt-in: it is not triggered by opening a document or resizing the window (an earlier iteration of this feature did both automatically; that was deliberately removed in favor of only the explicit commands), so a document's pagination never changes underneath the user without them asking for it. `DocumentView::applyReflow(em)` saves the current reading position as a coarse fraction (`pageno / pageCount`) before kicking off the relayout and restores the nearest page under the new pagination once `Model::documentRelayouted()` fires (`DocumentView::handleDocumentRelayouted`). Surfaced and fixed a latent bug in the process: `Model::cleanup_mupdf()` never reset the layout-size tracking fields used to skip redundant relayouts, so opening a new document after relayouting a previous one could spuriously believe the new document was "already laid out" at the old document's size and skip laying it out entirely — fixed by resetting them on every document swap. Known limitation, tracked in `TODO.md`: bookmarks/history/sessions store a raw `PageLocation{pageno,x,y}`, which a relayout invalidates (pagination changes what page N means); short-term behavior is "approximately right page," with a real fix (anchoring EPUB bookmarks to `(chapter, uri-fragment, y-fraction)` the way the outline now does) intentionally deferred as its own follow-up rather than bundled here.
-- **Menu icons switched from Freedesktop-themed to `QStyle::SP_*`-only for consistent cross-platform appearance.** The `fromTheme("name", SP_*)` approach shipped earlier this cycle looked better on Linux distros with a matching icon theme (Adwaita, Breeze, Papirus, …), but `QIcon::fromTheme` essentially never resolves on Windows or macOS — neither ships a Freedesktop icon theme — so those platforms (and theme-less Linux setups) always fell straight through to the `SP_*` fallback anyway. Net effect was "nicer on some Linux configurations, generic everywhere else," which is an inconsistent user experience across a cross-platform app. The `th(name, fallback)` helper in `initMenubar` now ignores the theme name entirely and always returns the `SP_*` icon, so every menu action renders identically regardless of OS or installed icon theme. All ~50 existing `th(...)` call sites were left untouched — only the helper's implementation changed — so this was a one-line fix rather than a full rewrite. Two Donate-icon options were considered (`SP_DialogYesButton` checkmark vs. re-introducing a themed icon for just that one action) and are still open; Qt's `SP_*` enum has no money, gift, or heart icon, so a perfect fit doesn't exist either way.
-- **`File → Session` submenu now has its own icon**, distinct from the `Save` action inside it: `SP_ComputerIcon` (previously it had none).
-- **Recent Files entries now show real per-file-type icons** instead of a single generic file glyph. `populateRecentFiles` uses `QFileIconProvider::icon(QFileInfo(path))`, which asks the *platform* for the icon associated with a file's type — native shell file-association icons on Windows, Finder/Launch-Services icons on macOS, and the desktop's mime-type icon (`application-pdf`, `image/vnd.djvu`, …) on Linux. This is a different (and more correct) mechanism than the menu's `SP_*`/theme icons above: it's not guessing an icon name, it's querying the OS's actual file-type registry, so a PDF, a DjVu, and an EPUB in the Recent Files list now show visually distinct icons instead of one uniform generic-file icon. One `QFileIconProvider` instance is reused across all entries (construction does some platform icon-theme setup work); falls back to `SP_FileIcon` if the provider returns a null icon (e.g. a moved/deleted file with no extension match). The `File → Recent Files` submenu label itself also got an icon (`SP_FileDialogDetailedView`).
-- **High-contrast tone stretch (accessibility).** New `[behavior].high_contrast` toggle plus `high_contrast_black_point` / `high_contrast_white_point` bounds (defaults `40` / `220`, both 0–255). When on, every rendered page runs through a LUT-based linear stretch: pixels ≤ black_point become pure black, pixels ≥ white_point become pure white, midtones stretched linearly across the span. Cleans up the muddy paper background of scanned PDFs and grayish DjVus and sharpens low-contrast text — a real win for users with low vision. Applied in both render paths: MuPDF (as `applyHighContrastSamples` on the raw sample buffer, ~1 ms per page) and DjVu (as `applyHighContrastQImage` on the QImage right after the page.bg/fg tint). The MuPDF invert / high-contrast / image-restore sequence was restructured so that high contrast runs after invert (so "dark mode + high contrast" is a legitimate combination), and the existing `dont_invert_images` image-protection tracker now also spares images from the contrast stretch — so colour photographs and figures don't get posterised. Exposed as the `high_contrast` command (no default keybinding — bind `high_contrast = "Ctrl+H"` in your config if you want one), a checkable `View → High Contrast` menu entry right after Invert Color, and `lektra.opt.behavior.high_contrast` / `.high_contrast_black_point` / `.high_contrast_white_point`. `Lektra::ToggleHighContrast()` walks every open view and calls `invalidatePageCaches()` + `renderPages()` on toggle so the change is immediate. Present in `default_config.toml` and the Lua stubs. Deliberate non-features: no S-curve / gamma alternative (linear stretch is the right operation for the scanned-page use case); no per-document override; no auto-refresh from the Lua setter (users need `lektra.cmd.execute("high_contrast")` or a manual re-render, matching the rest of `behaviorFields`).
-- **`lektra.opt.page.bg` / `.fg` now accept a hex-colour string as well as an integer.** Previously only the integer form (`0xFF223344`) worked; passing `"#RRGGBBAA"` or `"#RRGGBB"` — the same syntax the TOML parser accepts — silently produced `0` because `lua_tointeger` on a string like `"#3D5A80FF"` doesn't do what most users expect. A shared `readLuaColor(lua_State *L, int idx, uint32_t fallback)` helper in `src/lua/opt.cpp` routes strings through the same `parseHexColor()` the TOML `set_color` helper uses, and falls back to the previous integer path for other types. Wired up on `page.bg` and `page.fg` for now; the helper is generic and can be dropped into any other colour field (e.g. `annotations.*.color` / `glow_*`, `selection.color`, `link_hints.bg/fg`) with a one-line swap of the setter.
-- **Menubar items now carry standard system icons.** ~50 menu actions across File / Edit / View / Fit / Show-Hide / Tools / Navigation / Marks / Help have icons attached, plus the Show/Hide submenu label itself. Icons are looked up in two layers: `QIcon::fromTheme("<freedesktop-name>", QStyle::SP_<fallback>)` — the Freedesktop themed icon (Adwaita / Breeze / Papirus / Yaru / etc. all ship these names) is preferred on Linux, and the platform's `QStyle::SP_*` pixmap is the fallback for Windows, macOS, or servers running without an icon theme. All `setIcon(...)` calls live in one grouped block at the end of `initMenubar` under a `// --- Standard-style icons on menu actions ---` header, with two local helpers `ic(SP_*)` and `th("name", SP_*)` so each assignment stays a single readable line. Layout modes, tabs/statusbar toggles, and Visual Line mode are deliberately left iconless — no Freedesktop name unambiguously fits them and picking arbitrary ones would be worse than plain text. Special mentions: page navigation uses `go-first` / `go-previous` / `go-next` / `go-last` (SP_Media* fallback); location history uses `edit-undo` / `edit-redo` (SP_ArrowBack/Forward fallback) so it's visually distinct from page nav; Narrow-to-Region / Widen use `image-crop` / `view-restore` (SP_TitleBarShadeButton / SP_TitleBarUnshadeButton fallback); Set-Mark uses `bookmark-new`, Delete-Mark `edit-delete` / SP_TrashIcon; the Donate action gets `emblem-favorite` (a heart in most themes).
-- **`[window].show_menu_icons` config knob to turn the menu icons off.** Default `true`. Implemented via `QCoreApplication::setAttribute(Qt::AA_DontShowIconsInMenus, !show_menu_icons)` set at the top of the icon block in `initMenubar`, so icons are still assigned to every action but their visibility is a single app-wide flag. Consequence: toggling `lektra.opt.window.show_menu_icons = false` at runtime from Lua takes effect on the next menu paint — no re-run of `initMenubar` needed. The Lua setter flips the Qt attribute directly so live changes actually work. Present in `default_config.toml` and the `lektra.opt.window` schema (also mirrored in `stubs/lua/opt.lua`).
-- **`Auto Fit` moved into the `View → Fit` submenu.** Previously sat at the top level of the View menu; it's a modifier of the currently-selected fit mode (Width / Height / Page), so it now sits under Fit next to those, below the existing separator. Behaviour, checkable state, keybinding, and icon (`view-restore`) unchanged — pure re-parenting.
-- **`bookmark_export` and `bookmark_import` commands.** Both accept an optional path argument; called with no args they pop the appropriate file dialog. `bookmark_export` delegates to the existing `BookmarkManager::saveBookmarks(path)` so the exported file uses the exact same schema as `~/.local/share/lektra/bookmarks.json` — the file can be dropped straight in as `bookmarks.json` on another machine with no conversion. `bookmark_import` reads that same format and **merges** (not replaces) with the current set: entries whose `id` already exists locally are skipped, so re-importing the same file is idempotent; malformed entries (bad `location` JSON, missing fields) are counted under `skipped` and the good ones still land. After a merge the updated set is written back to the live `bookmarks.json` immediately so the import persists across restarts. Message-bar shows `Imported N, skipped M` on completion; open failures and JSON parse errors surface via `QMessageBox::warning`.
-- **Lua stubs (`stubs/lua/opt.lua`) fully synced with the C++ `lektra.opt` surface.** Grew 260 → 353 lines and now documents every field the audit exposed this cycle: `FitMode` enum gains `WidthSmart` / `HeightSmart`; `OptWindow` gains `show_menu_icons`; `OptLayout` gains `spacing`; `OptTabs` gains `elide_mode` / `location` / `open_position` (each with a proper string-literal `@alias` — LSPs will now autocomplete the valid values); `OptStatusbar` gains the full `components.{mode,pagenumber,session,zoom,filename,progress}` sub-table set as their own `@class` definitions; `OptPicker` gains `prompt` and the `shadow` sub-table (`OptPickerShadow` with `blur_radius`, `enabled`, `offset_x`, `offset_y`, `opacity`); `OptOutline` gains `prompt`, `generate_heading_ratio`, `generate_max_levels`; `OptHighlightSearch` gains `prompt`; `OptRendering.scale` renamed to `OptRendering.dpr` to match the actual Lua key; `OptBehavior` gains `auto_scroll`, `cache_password`, `close_on_last_tab`, `mupdf_store_size` (all four alphabetised); `OptAnnotationsPopup.color` removed (Popup has no `color` member — the old stub advertised a phantom field). Fixed a small pre-existing doc bug too: `OptStatusbar.padding` order is `left, top, right, bottom`, not the previously-documented `top, right, bottom, left`. `stubs/lua/event.lua` gets `OnAppShutdown = 20` on the `EventType` enum (present in `include/DispatchType.hpp` but was missing).
-- **`lektra.opt` fully audited against the TOML parser — every parseable config key is now reachable from Lua.** Previously `lektra.opt` covered ~105 of the ~200 keys the parser understands, and several fields that *were* declared were unreachable because of a subtler bug: `findField` uses binary search (`std::strcmp`) over each section's `LuaField` array, but several arrays were not sorted alphabetically, so misplaced entries were silently invisible. This release does three things at once. **(a) Fixes the sort violations** — `behaviorFields` had `mupdf_store_size` between `cache_pages` and `cache_password` (moved to between `invert_mode` and `num_recent_files`); `outlineFields` had `generate_heading_ratio` / `generate_max_levels` after `indent_width` / `show_page_number` (reordered); the freshly-added `tabs.open_position` sat after `visible` (moved into the right slot). All arrays are now sorted, and a comment above `outlineFields` calls out that this is a binary-search invariant. **(b) Adds every missing option**: `lektra.opt.tabs.elide_mode` and `lektra.opt.tabs.location` (both string enums matching the TOML choice strings); `lektra.opt.layout.spacing`; `lektra.opt.picker.prompt`, `lektra.opt.outline.prompt`, `lektra.opt.highlight_search.prompt` (all three string prompts); `lektra.opt.behavior.auto_scroll`; plus `lektra.opt.behavior.close_on_last_tab` and `lektra.opt.tabs.open_position` for the two knobs added earlier this cycle. **(c) Mounts previously-unreachable sub-tables**: `lektra.opt.picker.shadow` — the `pickerShadowFields` array existed but its `pushSection` mount was commented out (`blur_radius`, `enabled`, `offset_x`, `offset_y`, `opacity` are now settable from Lua); and the six `lektra.opt.statusbar.components.<mode|pagenumber|session|zoom|filename|progress>` sub-tables, none of which had any Lua exposure at all (six new `LuaField` arrays plus their mounts). The nested statusbar tables sit as direct fields on the proxy table so they coexist with the metatable-backed `statusbar.visible` / `statusbar.padding` access. All three pre-existing asymmetries the audit surfaced are also fixed in this release: the Lua key `rendering.scale` is renamed to `rendering.dpr` to match the TOML key (same underlying variant field, same accepted values — a number for a single DPR or a table keyed by screen name for per-screen DPR; alphabetical sort still holds); `[links].enabled` is now read by the TOML parser (`set(links["enabled"], m_config.links.enabled)` in `initConfig`; the field was already in `Config::Links` and consumed at `Model.cpp:2192`, so this just lets users actually configure it — advertised in `default_config.toml`); and the `lektra.opt.annotations.popup.color` bug is fully repaired. The Popup fix uncovered that the whole `annotPopupFields` array had been casting to `Config::Annotations::Rect *` instead of `Config::Annotations::Popup *`, which prompted a full cast-vs-mount audit of every `LuaField` array — and turned up a second wrong-cast site with the same UB shape: `pickerShadowFields` cast the shadow sub-object pointer to `Config::Picker *` and read `->shadow.<field>` on it (i.e. offsetting the shadow object as if it were a Picker, then indexing the shadow member — reading past the end of the shadow struct). Both wrong-cast sites are now fixed; every one of the 34 `LuaField` arrays casts to the type of the address its mount site passes. The Bug Fixes section has the full write-up.
-- **`[tabs].open_position` config knob for where new tabs land.** Accepts `"end"` (default — matches previous behaviour, tab appends after all existing tabs), `"start"` (insert at index 0), or `"after_current"` (insert immediately after the currently focused tab; falls back to `"end"` when no tab is currently open). New helper `Lektra::insertNewTab(page, title)` (`src/Lektra.cpp`) picks the right `addTab` / `insertTab(idx, ...)` call based on the config and returns the actual inserted index. All three user-open call sites — `OpenFileInNewTab`'s main path plus the two lazy-load placeholders in `OpenFiles` and `OpenFilesInNewTab` — go through the helper. `showStartupWidget` deliberately still uses plain `addTab` since it is a one-off first tab, not a user open.
-- **`[behavior].close_on_last_tab` config knob to quit LEKTRA when the last tab is closed.** Off by default (existing behaviour: an empty window remains, possibly showing the startup widget). When on, both close paths — `handleTabCloseRequested` (tab-bar X, close signal) and `Tab_close` (via `:tab_close` / keybinding) — call `close()` on the window when `m_tab_widget->count() == 0`. Because `close()` goes through `closeEvent`, `confirm_on_quit` still applies, so turning this on does not bypass a user's quit-confirmation prompt.
-- **Presentation mode is now implemented.** `TogglePresentationMode` in `src/Lektra.cpp` was previously a `TODO` stub that just returned; it now saves the current fullscreen state, menubar / statusbar / tabbar visibility, layout mode, and fit mode, then goes fullscreen, hides all chrome, switches to `LayoutMode::SINGLE`, and applies `FitMode::Window` so the current page fits fully inside the viewport. Invoking the command again restores the exact state that was saved — if you were already fullscreen or had already hidden a bar, exiting leaves that choice alone. Scrollbars are deliberately left untouched: fit-to-window sizes the page so they normally don't appear, and the config-level scrollbar policy stays in effect. Standard navigation / zoom / rotation / invert keys keep working while in the mode. Exposed via the existing `presentation_mode` command (no default keybinding — bind it in `[keybindings]` if you want one, e.g. `presentation_mode = "F5"`). Saved state lives in a `PresentationSaved` struct on `Lektra` so re-entering a fresh session is clean.
-- **Smart fit-to-width / fit-to-height that ignores blank page margins.** New `FitMode::WidthSmart` / `FitMode::HeightSmart` fit modes and matching commands `fit_width_smart` / `fit_height_smart` (with aliases `fit_to_page_width_smart` / `fit_to_page_height_smart`). Instead of fitting the raw page rectangle to the viewport, they detect the tight bounding box of the actually drawn content on the current page (text, figures, equations, images) via a MuPDF bbox device (`fz_new_bbox_device` + `fz_run_page`) and fit that content region to the window, then centre the viewport on it — so the blank margins get pushed into scroll-past space instead of consuming zoom. Results are cached per page and cleared on document swap. If the content isn't meaningfully smaller than the page (within 0.5%) the mode falls back to the plain fit math, and DjVu / image documents also fall back (they have no vector "content region" to sample). The `NextFitMode` cycler is unchanged: it still cycles Width → Height → Window and skips the smart modes so they are strictly opt-in. `handleDeferredResize` re-runs the smart calculation on window resize, so the viewport stays glued to the content region as the window changes size.
-- **`file_open_window` / `open_file_new_window` command.** The `OpenFileInNewWindow` helper already existed (forks a fresh Lektra process with the file as argument), but was not registered with the command manager. It is now exposed under two names: `file_open_window` (matches the existing `file_open_{tab,vsplit,hsplit,dwim}` family) and `open_file_new_window` (name used by the tutorial and existing docs). Both accept an optional path argument; called with no args they pop the file dialog.
-- **`default_config.toml` completely rewritten from the source.** The shipped default config had drifted badly from what the parser actually reads and from the compiled-in defaults, so the file has been regenerated section-by-section against `src/Lektra.cpp` (the TOML parse in `Lektra::initConfig`) and `include/Config.hpp` (the default values). Every one of the 27 top-level sections the parser understands is now shown (previously more than half were absent — `[behavior]`, `[synctex]`, `[rendering]`, `[search]`, `[selection]`, `[zoom]`, `[tabs]`, `[scrollbars]`, `[link_hints]`, `[links]`, `[jump_marker]`, `[command_palette]`, `[highlight_search]`, `[outline]`, `[misc]`), along with all the sub-tables (`[statusbar.components.{mode,pagenumber,session,zoom,filename,progress}]`, `[annotations.{highlight,rect,popup}]`, `[picker.shadow]`, `[picker.keys]`, `[rendering.dpr]`), and every field maps to a key the parser actually reads with the correct default value. All 10 dead action names in the old `[keybindings]` block (`annot_pen_mode`, `completion_next`, `completion_prev`, `layout_top_to_bottom`, `layout_left_to_right`, `llm_widget`, `search_this_page`, `split_focus_next`, `split_focus_prev` — none of which map to a registered command) were removed, and the `[keybindings]` / `[mousebindings]` values now match `initDefaultKeybinds()` / `initDefaultMousebinds()` verbatim (Vim-chord splits, `Alt+1..9` tab jumps, `Ctrl+g` page goto, `Ctrl+d/u` half-page scroll, `|`/`_` flips, `Ctrl+Shift+O` file picker, `Alt+Shift+O` recent files) so users copying values from the shipped default no longer get bindings that silently do nothing. `[picker.keys]` now reflects the real `Picker::Keybindings` defaults (`Up/Ctrl+K`, `Down/Ctrl+J`, `Ctrl+Shift+{Up,Down}` / `Ctrl+Shift+{K,J}` for section navigation, `Ctrl+Space` for structure-mode toggle, `Ctrl+{Up,Down}` for history).
-- Updated tutorial PDF file, with the entire content audited against the source: every `\keys{:...}` command reference now points at a real registered command (25 wrong names remapped, e.g. `add_bookmark` → `bookmark_add`, `save_session` → `session_save`, `show_*_picker` → `bookmarks` / `command_palette` / `file_picker` / `picker_outline` / `picker_highlight_search` / `files_recent`, `toggle_*` collapsed to the underlying `menubar` / `tabs` / `statusbar` / `focus_mode` / `presentation_mode`, `create_or_focus_portal` → `portal`, `save_as_file` / `encrypt_document` / `decrypt_document` → `file_save_as` / `file_encrypt` / `file_decrypt`); every default keybinding claim now matches `Lektra::initDefaultKeybinds()` in `src/Lektra.cpp` (Vim-chord splits `Ctrl+W,{s,v,h,j,k,l,c}`; annotation modes 1/2/3/4/5 = text-selection / highlight / rect / region-selection / popup; page-goto `Ctrl+g`, half-page scroll `Ctrl+d/u`, flip `|` / `_`, file-picker `Ctrl+Shift+O`, recent `Alt+Shift+O`); TOML section names corrected to the real parser keys `[keybindings]` / `[mousebindings]` / `[annotations.{highlight,rect,popup}]`; Lua API descriptions rewritten against `src/lua/*.cpp` (namespaces, actual method names, correct `lektra.keymap.set(command, keys_table)` signature, `lektra.event.register(EventType, fn)` example); and the tutorial's typography reworked so long file paths (`$HOME/.config/lektra/config.toml`, `$HOME/.local/share/lektra/sessions/`, `$prefix/share/lektra/lua/`, etc.) actually wrap inside the text block instead of overshooting the right margin (new `\pathtt` macro backed by the `seqsplit` package).
+- **Text reflow for EPUB/FB2/MOBI**, via new `font_size_increase`/`font_size_decrease`/`font_size_reset` commands — re-paginates the document at a larger or smaller text size without changing the page dimensions or affecting `zoom_in`/`zoom_out` (which stay pure raster scaling). Opt-in only; pagination never changes on its own. No default keybinding.
+- Menu icons switched to `QStyle` system icons only, for a consistent look across all platforms (previously mixed with Freedesktop theme icons that only rendered well on some Linux setups).
+- Recent Files entries now show real per-file-type icons from the OS instead of one generic glyph.
+- New accessibility feature: high-contrast tone stretch (`behavior.high_contrast`, with `high_contrast_black_point`/`high_contrast_white_point`) — cleans up muddy scanned-page backgrounds and sharpens low-contrast text.
+- `lektra.opt.page.bg`/`.fg` now accept hex-colour strings, not just integers.
+- ~50 menu actions across the app now have icons; toggle them off with `[window].show_menu_icons`.
+- `Auto Fit` moved into the `View → Fit` submenu.
+- New `bookmark_export`/`bookmark_import` commands, with merge-on-import so re-importing the same file is safe.
+- `lektra.opt` fully audited against the TOML config — every config key is now reachable and settable from Lua (previously about half were missing or silently broken due to internal sort-order/casting bugs).
+- New `[tabs].open_position` config (`end`/`start`/`after_current`) for where new tabs land.
+- New `[behavior].close_on_last_tab` to quit when the last tab closes.
+- Presentation mode is now fully implemented (previously a stub).
+- New smart fit-to-width/height (`fit_width_smart`/`fit_height_smart`) that ignores blank page margins.
+- `file_open_window`/`open_file_new_window` command is now actually registered.
+- `default_config.toml` rewritten to match the real parser and defaults.
+- Tutorial PDF audited and corrected against the real commands/keybindings.
 
 ### Bug Fixes
 
-- **Fix EPUB outline entries not navigating anywhere on double-click.** Two separate bugs stacked on top of each other. **(1)** MuPDF represents EPUB as multiple internal "chapters" (one `fz_document` chapter per XHTML spine file), so a `fz_outline` node's `page.page` is only the page number *local to `page.chapter`*, not the document-wide index — every outline consumer (`OutlinePicker::harvest`, `Lektra::NarrowToSection`, `DocumentView::NarrowToSectionByTitle`, and the outline JSON export/import in `Model.cpp`) was reading `node->page.page` directly and jumping to the wrong page on any document with more than one chapter. This is invisible for PDF/XPS/FB2/MOBI, which MuPDF always keeps as a single chapter (`page.page` already equals the global index), so the bug was EPUB-specific. **(2)** Fixing just that surfaced a second, more fundamental issue: MuPDF's EPUB outline loader (`epub_load_outline`) never actually resolves a node's destination at all — it leaves `node->page` at the sentinel `{-1, -1}` and `x`/`y` at `0`, and only stores a `uri` (an href into the internal spine), on the expectation that the *caller* resolves it via `fz_resolve_link()` (this is what MuPDF's own reference viewers, e.g. `platform/gl`, do). PDF doesn't hit this because it loads its outline through MuPDF's generic `outline_iterator` path, which calls `fz_resolve_link()` internally before handing the node back. New `Model::resolveOutlineNode(fz_outline *node, float *x, float *y)` (`include/Model.hpp`) handles both cases uniformly: if `node->page.chapter < 0`, it resolves the real location (and x/y) from `node->uri` via `fz_resolve_link()`; otherwise it uses the already-resolved `node->page` as-is; either way the chapter-local location is then converted to a global page index via `fz_page_number_from_location()`. All five outline consumers — the four above plus the Lua `view:outline()` binding (`src/lua/view.cpp`, previously exposed the same raw, unresolved `pageno`/`x`/`y` to scripts) — now go through this one resolver instead of reading `fz_outline` fields directly. Outline *construction* sites (`Model::generateOutline()`'s font-size heuristic, and JSON import via `json_to_outline`) were already producing real chapter-aware locations via `fz_location_from_page_number()`, so they're unaffected; DjVu (which has no `fz_document`/chapter concept at all — it uses the separate `DjVuLib` API) is unaffected too, since `resolveOutlineNode()`/`pageNumberFromLocation()` both fall back to treating `page.page` as already-global when `m_doc` is null.
-- **Fix images rendering as diagonal coloured stripes / slanted noise when `behavior.dont_invert_images` was enabled.** `restore_image_regions` (`src/Model.cpp`) draws each tracked image into a temporary sub-pixmap and then copies its rows back into the main render pixmap so the inversion pass doesn't touch the image regions. The sub-pixmap was being created with `alpha = 1` (adding an alpha channel), but the main render pixmap is created with `alpha = 0`. In an RGB colourspace that means the sub has 4 components (RGBA) while the main has 3 (RGB) — so the row-copy loop walked the source in 4-byte pixel steps but `memcpy`-ed only `width * 3` bytes into the destination. Each source pixel therefore shifted the destination by one byte, and the alpha byte of pixel *N* became the red byte of pixel *N + 1*: exactly the "one-byte bleed marching across every row" pattern that shows up on-screen as slanted RGB stripes. Fixed by creating the sub-pixmap with the same `alpha` as the main pixmap — `fz_new_pixmap_with_bbox(ctx, colorspace, clipped, nullptr, fz_pixmap_alpha(ctx, pix))` — so component counts always match regardless of the main pixmap's colour configuration. Transparency behaviour is unchanged: `fz_clear_pixmap_with_value(ctx, sub, 255)` still runs before `fz_fill_image`, so images composite against a white background exactly as before.
-- **Fix `[page].bg` / `[page].fg` being silently ignored for DjVu files.** The MuPDF render path already applies the configured page background / foreground via `fz_tint_pixmap`, but the DjVu path handed the pixel buffer returned by `djvu.page_render` straight to a `QImage::Format_RGB32` with no post-processing, so DjVu pages always came out with their native (usually paper-white) background. New static helper `tintQImageRGB(QImage &, uint32_t fg_rgb, uint32_t bg_rgb)` in `src/Model.cpp` performs the same linear channel remap MuPDF does (`0 → fg`, `255 → bg`, interpolate) and is now called on every DjVu render right after `image.copy()`. Identity colours (fg=black, bg=white) short-circuit at the top of the helper so the default case pays no per-pixel cost. Uses the same `>> 8` alpha-drop convention as the MuPDF call site (`(m_fg_color >> 8) & 0xFFFFFF`, `(m_bg_color >> 8) & 0xFFFFFF`) so identity semantics match between the two paths — `page.bg = "#FFFFFFFF"`, `page.fg = "#000000FF"` remains a no-op for DjVu the same way it is for PDF.
-- **Fix duplicate default keybindings for anyone with a `[keybindings]` block in their config.** `Lektra::construct()` was calling `initDefaultKeybinds()` at line 160 *and* `initConfig()` was calling it again at the top of its `[keybindings]` block (when `load_defaults` was true, which is the default). `setupKeybinding` does not dedupe re-registrations for the same action, so every default binding got a second `QShortcut` and a duplicated entry in `m_config.keybinds[action]`. Two visible symptoms: menu labels rendering the same key twice ("Scroll down\th, h", "Rotate\t>, >") because they join `keybinds[action]` with ", "; and two `QShortcut::activated` signals firing per keypress on defaults (cheap now, but a footgun if any bound action becomes non-idempotent). `initDefaultKeybinds()` is now called exactly once, from inside `initConfig()`, at the right point: on the "no config file" early return, on the "parse error" early return, and — for the normal path — either when the `[keybindings]` block is absent or when it has `load_defaults = true`. When the user opts out with `load_defaults = false`, the defaults are now genuinely skipped (previously the outer call had already loaded them, so the flag was a no-op). Also fixed an adjacent bug in the same block: the action iteration was reading *every* key under `[keybindings]` and passing it to `setupKeybinding`, including `load_defaults` itself — which meant `setupKeybinding("load_defaults", {"true"})` was called on every startup. `QKeySequence("true")` silently produced nothing usable, but Qt state got churned; the loop now skips `load_defaults` explicitly.
-- **Fix two wrong-cast undefined-behaviour sites in `src/lua/opt.cpp`.** Two `LuaField` arrays were casting the incoming `void *` to the wrong `Config` sub-type, so every field access dereferenced memory past the end of the actual object. **(1)** `annotPopupFields` cast to `Config::Annotations::Rect *` even though the mount site passes `&config.annotations.popup`. Base-class fields (`hover_glow`, `glow_color`, `glow_width`, `comment`, `comment_font_size`) happened to work because `Rect` and `Popup` both keep `Base` at offset 0, but `color` — a Rect-only field — read/wrote bytes past the end of the actual `Popup` object. Fixed by casting to `Config::Annotations::Popup *` and dropping the fake `color` field to match the C++ struct. **(2)** `pickerShadowFields` cast to `Config::Picker *` even though the mount passes `&config.picker.shadow` (a `Config::Picker::shadow` sub-object). Every entry then wrote through `->shadow.<field>`, so the access landed at `offset(shadow_member_in_Picker)` *from the start of the shadow object* — reading/writing well past the end of the actual `Picker::shadow`. Fixed by casting to `struct Config::Picker::shadow *` (elaborated `struct` prefix is required because the nested struct and its member variable share the identifier `shadow`, so the unqualified name resolves to the member, not the type). Full audit of the remaining 32 `LuaField` arrays confirms every cast now matches the mount-site address type; a doc-comment on each of the two fixed arrays documents the prior bug so nobody re-introduces it.
-- **Fix focus mode not remembering the pre-toggle UI state.** `setFocusMode(false)` used to restore the menubar / statusbar / tabbar visibility from `m_config.window.menubar` and `m_config.statusbar.visible` — the startup baseline — which meant any manual bar toggles the user had made this session got clobbered on exit (e.g. `Ctrl+Shift+M` to hide the menubar → `:focus_mode` on → `:focus_mode` off → menubar came back even though the user had asked for it to stay hidden). It now snapshots the actual runtime visibility (`!m_menuBar->isHidden()`, `!m_statusbar->isHidden()`, `m_tab_widget->tabBar()->isVisible()`) into a new `FocusModeSaved` struct on enter, and restores from that on exit. Also guards against redundant calls: `if (m_focus_mode == enable) return;` prevents a second `setFocusMode(true)` from overwriting the saved state with the now-hidden values.
-- **Fix "Open File in VSplit / HSplit" always opening the first file in a new tab (fit-to-width) instead of splitting the current view.** The menu action routed the first file through `OpenFileInNewTab`, which forced the new view into `initial_fit` (Width by default) and clobbered the current view's zoom/fit. The first file now goes through `OpenFileVSplit` / `OpenFileHSplit`, which split the current view when a tab is open and only fall back to a new tab when nothing is open.
-- **Fix optional runtime libraries not loading on Debian/Ubuntu when the corresponding `-dev` package is not installed.** `QLibrary("djvulibre")` (and similarly `"rsvg-2"`, `"cairo"`) resolved to the unversioned `libdjvulibre.so` symlink, which only ships with `libdjvulibre-dev` — runtime users only have `libdjvulibre.so.21`. The workaround users hit on MX-25 was manually symlinking `libdjvulibre.so → libdjvulibre.so.21`. Now `QLibrary` is passed the SONAME version explicitly (`QLibrary("djvulibre", 21)`, `QLibrary("rsvg-2", 2)`, `QLibrary("cairo", 2)`), so the loader picks up the versioned SONAME directly on all Debian derivatives.
-- **Fix SIGSEGV when opening a file via "Open File in VSplit / HSplit" (reentrant `currentChanged`).** `m_tab_widget->addTab(container, tabTitle)` in `OpenFileInNewTab` fired `QTabBar::currentChanged` synchronously, which called `handleCurrentTabChanged` → `setCurrentDocumentView` → `updateStatusbar` on a half-initialised view: `view->openAsync()` had just been kicked off, so the model was still mid-initialisation and `m_doc` still pointed at the previous view. Fixed by wrapping `addTab` + `setCurrentIndex` in `blockSignals(true/false)` and calling `setCurrentDocumentView(view)` explicitly after the tab is fully wired up (same pattern already used by the lazy-load path in `handleCurrentTabChanged`).
-- **Fix DjVu open silently accepting FAILED / STOPPED decode jobs** (`Model.cpp::openAsync_djvu`). The pump loop exited on `job_status >= 2`, but libdjvulibre uses `2=OK, 3=FAILED, 4=STOPPED`. Code then called `doc_pageinfo` on a failed doc and divided by `info.dpi == 0`, poisoning `m_default_page_dim` with NaN/Inf which corrupted every downstream layout computation. The loop now uses `< DJVU_JOB_OK`, we verify `status == DJVU_JOB_OK` after the pump, and `doc_pageinfo` results are validated (`info.dpi/width/height > 0`) before use. Repro: open a truncated `.djvu`.
-- **Fix heap corruption in DjVu page render on zero-DPI / oversized pages** (`Model.cpp` DjVu render). `page_dpi(page)` can return 0 → `scale = ∞` → the `float→int` cast is UB and the resulting `QByteArray(stride * rh, 0)` becomes undersized/negative/huge, so `page_render` writes past the buffer. Now guarded: `native_dpi <= 0`, pre- and post-rotation dimensions `<= 0`, and render pixel size `> 32k` all short-circuit with `job_release`. The buffer-size computation is done in `qint64` and validated against `INT_MAX` before allocation, so a 25k² page can no longer wrap `int` and produce an undersized buffer.
-- **Fix null-deref in DjVu message pumps.** `djvu.msg_wait(ctx)` is documented to return `NULL` (context released, or certain errors); both the doc-open pump and the page-render pump now null-check the return before dereferencing `msg->m_any.tag`. Repro: rapid open/close of DjVu docs while the first is still pumping.
-- **Fix use-after-free when the DjVu document is freed with a render still running.** `Model::close()` (invoked on tab close and quit) now calls `waitForPendingRenders()` and resets `m_render_cancelled` before running the type-specific cleanup. Previously a background `djvu.page_render` could still be executing against `m_ddjvu_doc` when `ctx_release` freed it.
-- **Fix data race on image state during document swap.** `cleanup_image` now takes `m_page_dim_mutex` around `m_image_cache`, `m_page_dim_cache`, and `m_default_page_dim` mutations (matching the pattern in `cleanup_mupdf`). All three image-open QMetaObject callbacks (SVG, non-animated, QMovie/animated) also call `waitForPendingRenders()` before `cleanup_image()`, so a previous document's render worker cannot read state we are swapping out.
-- **Fix QMovie signal-during-destruction crash.** `cleanup_image` used to `delete m_movie` immediately, while `frameChanged`/`updated` slots may still be firing. It now `disconnect()`s and calls `m_movie->deleteLater()`, deferring destruction to the next event-loop tick.
-- **Fix crash in preview `navigateTo` when the timer outlives the window.** `QTimer::singleShot(0, navigateTo)` in the preview open-callback used the no-receiver overload, so a Lektra destroyed between `openFileFinished` and the timer firing would let the closure dereference a dead `this`. It also read `m_doc->zoom()` at fire time, applying the wrong zoom if the active tab had changed. Now: `this` is the singleShot receiver, `zoom` is captured by value at connect time, and `m_doc` is null-guarded.
-- **Fix null-deref in `onNewIPCConnection`.** `qobject_cast<QLocalServer*>(sender())` and `nextPendingConnection()` were both dereferenced unconditionally; either can be null (programmatic slot invocation, race on the server queue). Both are now null-checked.
-- **Fix infinite rotation loop on cross-window tab drop with untrusted `TabData`.** `handleTabDropReceived` used `while (currentRotation != targetRotation) { RotateClock(); }`; a `data.rotation` that wasn't a multiple of 90 (payload from another version, or corrupted) never converged, locking the UI. Rotation is now normalised to `[0, 360)`, required to be a multiple of 90 (or skipped entirely), and the loop is capped at 4 iterations. `data.currentPage - 1` is clamped to `[0, numPages)` to reject negative or out-of-range payloads.
-- **Fix DjVu files with non-ASCII paths failing to open on Windows.** The dynamic-loader binding resolved `ddjvu_document_create_by_filename`, which takes a path in the OS locale encoding (ANSI on Windows), but the call site always encoded with `QString::toUtf8()`. On Windows any accented / CJK / Cyrillic characters in the path produced a mojibake filename and the open silently failed. `DjVuLib` now prefers `ddjvu_document_create_by_filename_utf8` (available since libdjvulibre 3.5.24) and only falls back to the plain entry point for very old builds; the call site encodes with `toUtf8()` or `toLocal8Bit()` to match whichever variant was loaded.
-- **Fix "Open Containing Folder" from the tab context menu doing nothing.** `openInExplorerForIndex` used `qobject_cast<DocumentView *>(m_tab_widget->widget(index))`, but tabs are inserted as `DocumentContainer *`, so the cast always returned nullptr and the function silently no-oped on every invocation. It also called `QDesktopServices::openUrl` on the file path itself (not the parent directory), so even if the cast had succeeded it would have opened the document instead of the folder. Both are fixed: reach the view via `rootContainer(index)->view()` and pass the containing folder's path.
-- **Fix stale search results repopulating and stale "No matches" popups after cancel or re-search.** Late partial results from a superseded search were merged into `m_search_hits` (redrawing scrollbar marks the user had just cleared), and a slow search cancelled seconds ago could still pop up a modal "No matches" dialog. `DocumentView` now carries a `m_search_gen` / `m_search_dispatched_gen` pair: `clearSearchHits` bumps the generation, `Search` / `SearchInPage` snapshot it right before dispatching to the model, and both result handlers drop any batch whose dispatched-gen no longer matches.
-- **Fix multi-file CLI open running `--command` before any file has loaded.** `lektra a.pdf b.pdf --command "goto 5"` used to execute `goto 5` against whatever tab was current before the async loads finished (usually nothing). The multi-file branch now opens the first file with a callback that fires `runCliCommands` after that document actually loads, opens the rest into extra tabs, and restores focus to tab 0 so the command targets the first file (matching the single-file branch's existing chained-callback semantics).
-- **Fix a race in `DocumentView::openAsync` where rapid consecutive opens could double-fire `handleOpenFileFinished`.** The sequence was `setFuture → disconnect → connect`; if the previous future emitted `finished` between `setFuture` and the new `connect`, the old slot ran against a stale model and the new slot then ran again. Reordered to `disconnect → connect → setFuture` so the new connection is always in place before a future can complete against it.
-- **Fix File Properties freezing the UI on a DjVu with a broken annotation job.** `populateDjVuProperties` busy-waited on `doc_anno == dummy` with no failure exit, so a silently-erroring annotation job kept the main thread spinning forever. The loop is now capped at 500 iterations and logs a warning before returning the base properties.
+- Fix EPUB outline entries not navigating anywhere on double-click.
+- Fix images rendering as diagonal coloured stripes when `behavior.dont_invert_images` was enabled.
+- Fix `[page].bg`/`.fg` being ignored for DjVu files.
+- Fix duplicate default keybindings when a `[keybindings]` block was present in the config.
+- Fix two memory-safety bugs in the Lua config bridge that could read/write past object bounds.
+- Fix focus mode not remembering the pre-toggle menubar/statusbar/tabbar visibility.
+- Fix "Open File in VSplit/HSplit" always opening the first file in a new tab instead of splitting.
+- Fix optional runtime libraries (djvulibre, rsvg, cairo) not loading on Debian/Ubuntu without the matching `-dev` package installed.
+- Fix a crash opening a file via VSplit/HSplit.
+- Fix DjVu silently accepting a failed/corrupt decode job instead of reporting an error.
+- Fix heap corruption rendering DjVu pages with zero DPI or oversized dimensions.
+- Fix several null-deref crashes in DjVu message handling and during document swap.
+- Fix a crash destroying an animated image mid-playback.
+- Fix a crash in preview navigation when the window closes mid-timer.
+- Fix a null-deref on IPC connection handling.
+- Fix an infinite rotation loop from a malformed cross-window tab drop.
+- Fix DjVu files with non-ASCII paths failing to open on Windows.
+- Fix "Open Containing Folder" doing nothing.
+- Fix stale search results/popups reappearing after cancelling or re-searching.
+- Fix multi-file CLI open running `--command` before any file had actually loaded.
+- Fix a race that could double-fire the open-finished handler on rapid consecutive opens.
+- Fix File Properties freezing on a DjVu file with a broken annotation job.
 
 ---
 
@@ -57,777 +52,207 @@
 
 ### New Features
 
-- Update MuPDF to 1.28.2 (from 1.27.2) [release history](https://mupdf.com/releases/history)
-- **EXIF metadata in File Properties:** Image files now show EXIF tags (camera, lens, ISO, shutter, aperture, date, GPS, etc.) in the existing File Properties dialog. Uses a runtime probe of `libexif.so.12` (Linux/macOS) or `libexif-12.dll` (Windows) — no build-time dependency, and silently skips if libexif isn't installed. Thumbnail IFD is filtered out to avoid duplicate entries; values are truncated at 200 characters.
-- **Donate / Support dialog:** A new "Donate / Support" entry in the Help menu (also available via the `donate` command) opens a dialog with links to Ko-fi, Liberapay, and GitHub Sponsors. The dialog is shown once on first run (tracked via a sentinel file in the app data directory).
-- **Crash reporter:** When Lektra crashes, a dialog displays the crash log and offers a one-click button to open a pre-filled GitHub issue. The crash handler is installed at startup via `CrashHandler::install()`. On Linux/macOS, fatal signals (SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS) are caught; on Windows, `SetUnhandledExceptionFilter` is used. A stack trace is written to `~/.local/share/lektra/crashes/crash_latest.log` (Linux/macOS) or `%TEMP%\lektra_crash.log` (Windows). A forked/spawned clean process then shows the `CrashReporterDialog` with the log, a "Copy to Clipboard" button, and a "Report on GitHub" button. Stack traces include function names and file/line numbers when built with `RelWithDebInfo` or `Debug`; release builds show addresses only.
+- Updated MuPDF to 1.28.2.
+- EXIF metadata now shown in File Properties for image files (via optional libexif).
+- New Donate/Support dialog (Help menu, shown once on first run).
+- New crash reporter: on crash, shows the log with a one-click "Report on GitHub" button.
 
 ### Bug Fixes
 
-* **Fix crash (SIGSEGV) when cancelling the file dialog opened via "Open File in VSplit / HSplit":** `OpenFilesInVSplit` and `OpenFilesInHSplit` passed an empty file list to the file dialog and then unconditionally accessed `qfiles[0]` after it returned. When the user cancelled the dialog, `qfiles` was empty and the index access caused a segmentation fault. Fixed by returning early when `qfiles` is empty after the dialog closes.
-* **Fix page gaps disappearing after scrolling in PDFs where the first page differs in size from the content pages:** `cachePageStride()` is called at open time when only page 0's dimensions are known; all other pages fall back to `m_default_page_dim` (page 0's size). If the cover or title page is a different height than the body pages, the precomputed strides are wrong and content pages overflow into the gap below them once they render. Fixed by comparing each rendered page's true stride against `m_page_offsets` in `renderPageFromImage()`; if a mismatch greater than 0.5 px is detected, `m_page_layout_stale` is set. On the next `renderPages()` pass, `cachePageStride()` + `repositionPages()` + `updateSceneRect()` are re-run before visible pages are computed. For uniform-page-size documents the check is a no-op; for mixed-size PDFs it triggers at most once per newly discovered page dimension.
-* **Fix crash when opening file in vsplit/hsplit from the menu:** `qfiles[0]` was being read on a `QList` that had already been moved into the lambda capture in the same call expression — the C++ order-of-evaluation rules let the compiler run the move first.
+- Fix a crash cancelling the file dialog opened from "Open File in VSplit/HSplit".
+- Fix page gaps appearing after scrolling in PDFs whose first page differs in size from the rest.
+- Fix a related crash opening files in vsplit/hsplit from the menu.
 
 ---
 
 ## 0.7.6
 
----
-
 ### New Features
 
-* **`narrow_to_section` command (and Lua API):** Narrow the view to a named section from the document outline. With no arguments a picker dialog lists all outline entries (indented to show hierarchy); with an argument the first exact then substring match is used. The narrow region extends from the section's start page through the page where the next non-descendant section begins (inclusive), so overflow content that spills onto the next heading's page is always visible. Works with embedded, generated, and loaded outlines. Also exposed to Lua as `view:narrow_to_section(title)`. Descendant detection uses both depth (properly nested outlines) and title prefix (flat PDF outlines where sub-entries share the parent's depth level).
-
-* **`narrow_to_pages` command (and Lua API):** Narrow the view to an inclusive range of 1-indexed pages instead of a single-page rubber-banded region. Invoke as `narrow_to_pages 5 10` or `narrow_to_pages 5-10`; the narrow rect becomes the union of the scene rects of every page in the range, scrolling and rendering focus stay inside the range, and `search` is already page-range aware so it only searches within those pages. `widen_region` exits pages-narrow the same way it exits region-narrow. Also exposed to Lua as `view:narrow_to_pages(start, end)`.
-
-* **`search_below` and `search_above` commands (and Lua APIs):** Two new directional-search commands scope the search to a page range relative to the current page. `search_below` searches from `m_pageno` forward (inclusive); `search_above` searches from page 0 through `m_pageno` (inclusive). Both accept an optional inline term (searches immediately) or open the search bar with the direction primed — Enter then runs the scoped search. The scope is one-shot: after the search is dispatched, `DocumentView` reverts to full-document scope so the next plain `search` behaves normally. Narrow region mode still takes precedence over the directional scope. Also exposed to Lua as `view:search_below(query, regex?)` and `view:search_above(query, regex?)`.
-
-* **Narrowed search restricts hits to the narrowed page and region:** With a narrow region active, `search` now runs only on the narrow page (via a new `pageTo` parameter on `Model::search`) instead of scanning the entire document. Results are then post-filtered in `DocumentView::handleSearchResults` / `handlePartialSearchResults` to drop any hit whose quad center falls outside the narrow rect. The search count reported to the search bar reflects the filtered hits so navigation index/total stays consistent.
-
-* **`open_config` now handles both `config.toml` and `init.lua`:** The command opens `config.toml` when present, falls back to `init.lua` when only the Lua config exists, and shows a chooser dialog when both are present so users can pick which file to edit.
-
-* **Narrow-region indicator in the statusbar:** When the document is in narrow region mode, an orange **N** badge appears in the left section of the statusbar. Hovering it shows a tooltip explaining how to exit. The badge is cleared automatically when Wide Region is invoked, and is correctly seeded when switching between tabs.
-* **Viewport-clipped rendering at high zoom for major performance improvement:** When zoom exceeds 2.5×, the render pipeline now clips the MuPDF pixmap to the visible viewport region plus a 50% margin in each direction, instead of rasterising the entire page. At extreme zoom levels (e.g. 8×) the full page can be 50–100× larger than the viewport; only ~2× the viewport area is now rasterised, giving proportional speedups. The clipped image is drawn at the correct offset within the full-page bounding rect so link, annotation, and search overlays remain correctly positioned. A fresh clip is requested automatically after each scroll or zoom change.
-* **Region selection and context menu now available in image mode:** Region select mode can now be activated when viewing images (JPEG, PNG, GIF, etc.) via the mode menu or keyboard shortcut. Drawing a rubber band shows the context menu with all compatible actions. The context menu adapts to the file type: "Copy Region as Image (Custom DPI)" is hidden for pure raster images (re-rendering at a different DPI is only meaningful for vector/text-based formats), and "Copy Text from Region" is hidden unless the document supports text extraction.
-* **Generate outline from document text:** When a PDF has no embedded outline, a heuristic outline can be generated via the `generate_outline` command or the "Generate Outline" menu entry. The algorithm scans all pages for text lines whose maximum character font size is at least `outline.generate_heading_ratio` times the modal (body) body text size (default 1.2×). Up to `outline.generate_max_levels` distinct font-size tiers are recognised as heading levels (default 3). The generated outline is shown in the standard outline picker and persists for the lifetime of the document tab — calling `ShowOutline` (`picker_outline`) will use it automatically if no real outline exists.
-* **Export outline to JSON file:** The `export_outline` command opens a save-file dialog and writes the currently active outline (real PDF outline, or generated/loaded synthetic outline) to a human-readable JSON file. Each entry records `title`, `page` (1-based), `x`, `y`, and a `children` array for nested outlines.
-* **Load outline from JSON file:** The `load_outline` command opens a file dialog, reads a previously exported outline JSON, and immediately displays it in the outline picker. The loaded outline is stored per-document and persists across tab switches for the session — invoking `picker_outline` on a document with no embedded outline will automatically fall back to the loaded one.
-
----
+- New `narrow_to_section` command — narrow the view to one outline section.
+- New `narrow_to_pages` command — narrow to an inclusive page range.
+- New `search_below`/`search_above` commands — scope search to before/after the current page.
+- Search now respects an active narrow region or page range instead of scanning the whole document.
+- `open_config` now handles both `config.toml` and `init.lua`, prompting when both exist.
+- Narrow-region indicator badge added to the statusbar.
+- Major rendering performance improvement: at high zoom, only the visible viewport region is rasterised instead of the whole page.
+- Region selection and its context menu now work in image mode too.
+- New `generate_outline` command — builds a heuristic outline from text font sizes when a PDF has none.
+- New `export_outline`/`load_outline` commands for saving/loading an outline as JSON.
 
 ### Removed
 
-* **`--check-config` CLI flag removed:** The TOML config validator maintained a hard-coded whitelist of every valid section and key, which drifted out of sync with the actual config schema as options were added. The flag and its `checkConfigFile()` implementation have been removed.
-
----
+- `--check-config` CLI flag removed (its validator had drifted out of sync with the real config schema).
 
 ### Bug Fixes
 
-* **Fix search bar close button leaving search highlights on the page:** Clicking the close button in the search bar only called `clearFocus()` and `hide()`, so the last search's highlights and index/count labels stayed active until a new search was started. It now also clears the input and emits an empty `searchRequested` signal — the same path the input takes when its text is emptied — so highlights are dropped and search mode exits cleanly.
-
-* **Fix Visual Line mode not activating when selected via the statusbar mode label:** Clicking the mode label to cycle into "Visual Line" only called `GraphicsView::setMode(VisualLine)`, leaving `DocumentView::m_visual_line_mode` false and never running `snapVisualLine()` — so the label updated but the mode did nothing. `NextSelectionMode` now routes through `set_visual_line_mode(true)` when entering VisualLine and tears it down cleanly when cycling out.
-
-* **Fix `applyNarrow` restoring text selection mode in image mode:** After drawing a narrow region, the mode was restored using `TextSelection` as the hardcoded fallback when the document's default mode was `None`. Image documents have `None` as their default mode (no text layer), so they always ended up in `TextSelection` after narrowing — a mode that does nothing for images. The fallback now restores `RegionSelection` for image documents instead.
-
-* **Fix narrow region breaking after document rotation or flip:** Two bugs compounded. (1) The dim overlay and scrolling-bounds scene rect were never refreshed after the async re-render that follows a rotation — the overlay stayed frozen at the pre-rotation position until the next scroll. Fixed by calling `refreshNarrowVisuals()` from `renderPageFromImage()` when the re-rendered page is the narrow page. (2) The narrow region was stored as normalized fractions of the page's width/height. A 90° rotation swaps the page dimensions, so the same fractions mapped to a completely different visual area. Fixed by geometrically remapping `m_narrow_local_normalized` before each rotation/flip: 90° CW `(l, t, w, h)` → `(t, 1−l−w, h, w)`; 90° CCW → `(1−t−h, l, h, w)`; FlipH → `(1−l−w, t, w, h)`; FlipV → `(l, 1−t−h, w, h)`.
-
-* **Fix text highlight annotation not applied for short adjacent-line selections:** In TextHighlight mode, the annotation was only created when the release-time drag distance exceeded 50 units in scene coordinates. Two bugs compounded: (1) the threshold was measured in scene units, so at high zoom `mapToScene` compressed the movement — e.g. dragging across two lines at 4× zoom yielded only ~12 scene units, well below 50; (2) even with a corrected screen-pixel threshold, 50 pixels is too large for a typical one-line-down drag (~25 px). The root fix: TextHighlight mode no longer gates annotation creation on the drag threshold at all. The annotation handler already guards via `hasTextSelection()`, which is false when no mouse movement occurred (no mousemove emission → no selection built), so accidental single-click highlights are still impossible. Additionally, the drag check for TextSelection mode (visual selection overlay) was switched from scene-coordinate distance to screen-pixel distance so it remains zoom-independent.
+- Fix search bar close button leaving highlights on the page.
+- Fix Visual Line mode not activating from the statusbar mode label.
+- Fix narrow-region mode defaulting to the wrong selection mode for images.
+- Fix narrow region breaking after document rotation or flip.
+- Fix text highlight not applying for short adjacent-line selections.
 
 ---
 
 ## 0.7.5
 
----
-
 ### New Features
 
-* **Right-click context menu for internal PDF links:** Right-clicking any internal link now shows a menu with:
-* **Open in New Tab** — Opens the same document in a new tab and navigates to the link target.
-* **Open in Preview** — Shows the link target in the floating preview overlay (same as the configured preview mouse action).
-* **Open as Portal** — Creates a portal split to the link target (same as the configured Ctrl+click action).
-* **Open in Split → Vertical / Horizontal** — Opens a vertical or horizontal split unconditionally, ignoring the portal split-direction configuration.
-* **Copy Link Address** — Copies the link destination string to the clipboard (renamed from "Copy Link Location").
-* *Note:* External links will only show "Copy Link Address". The menu is implemented in `BrowseLinkItem::contextMenuEvent()`; each action emits a signal that bubbles through `DocumentView` to `Lektra`, reusing the existing preview and portal infrastructure where possible.
-
----
+- Right-click context menu for internal PDF links (open in new tab, preview, portal, split, copy address).
 
 ### Improvements
 
-* **Eliminate redundant work in the render cycle:**
-* `updateSceneRect()` was being called unconditionally at the end of `renderPages()`, even when the zoom-bake block had already called it in the same cycle. This caused a double `setSceneRect()` on every zoom event. It is now skipped when zoom has just been baked (except in thumbnail mode, where item bounds contribute to the scene rect).
-* `getPreloadPages()` was re-entering `getVisiblePages()` internally, even though the caller already held the result. The signature has been changed to accept the visible-page set as a parameter, eliminating the redundant cache lookup on every render cycle.
-* `cachePageStride()` was allocating a `QFont` and `QFontMetricsF` on every call in thumbnail mode to compute the label row height, even though the value is constant for a given configuration. The result is now cached in `m_thumbnail_label_height` and computed only once.
-* **Reduce default memory usage significantly:** Three sources of excess allocation have been eliminated:
-* **MuPDF internal store** reduced from `FZ_STORE_DEFAULT` (256 MB) to 64 MB. The store caches decoded embedded images, fonts, and glyph bitmaps; the old cap allowed it to silently consume the majority of the process RSS on image-heavy documents. The limit is now configurable via `behavior.mupdf_store_size` (integer, MB).
-* **Alpha channel removed from rendered pixmaps:** `fz_new_pixmap_with_bbox` was called with `alpha=1`, producing 4-component RGBA pixmaps even though the page background is always cleared to opaque white and the alpha plane is never used. Changed to `alpha=0`; rendered pages are now stored as `Format_RGB888` (3 bytes/pixel) instead of `Format_RGBA8888` (4 bytes/pixel), yielding a 25% reduction per cached and displayed page image.
-* **OpenGL MSAA disabled:** The OpenGL viewport was configured with 4× MSAA (`format.setSamples(4)`), which multiplies the GPU framebuffer size (color, depth, stencil) by four. On integrated-GPU systems, this memory is carved from system RAM and shows up directly in process RSS (~60–100 MB at 1080p). MSAA brings no quality benefit for a document viewer because MuPDF already antialiases text and images at the CPU level. Samples are now always set to 0.
-* **OpenGL `CacheBackground` removed:** `QGraphicsView::CacheBackground` allocated a redundant full-viewport pixmap for what is typically a solid-color scene background. Replaced with `CacheNone`.
-* **Change default rendering backend from `Auto` (OpenGL when available) to `Raster`:** The OpenGL backend adds ~150–185 MB of driver and framebuffer overhead with no meaningful quality or performance benefit for document viewing. OpenGL remains available via `rendering.backend = "opengl"` in the configuration.
-
----
+- Reduced default memory usage significantly: smaller MuPDF cache, dropped the unused alpha channel on rendered pages, disabled unnecessary OpenGL MSAA/background caching, and switched the default rendering backend from OpenGL to Raster (OpenGL remains available via config).
+- Removed redundant work in the render cycle (duplicate scene-rect updates, redundant cache lookups).
 
 ### Bug Fixes
 
-* **Fix pages rendering slanted after zoom when using RGB (non-alpha) pixmaps:** The two `QImage` construction sites in the render pipeline were using `QImage(w, h, fmt)` + `memcpy(image.bits(), samples, stride * height)`. For `Format_RGB888` (3 bytes/pixel), Qt pads each scanline to the next 4-byte boundary. When the rendered page width was not divisible by 4, the bulk `memcpy` wrote rows without the padding, shifting every subsequent row and producing a diagonal slant. Fixed by using the stride-aware constructor `QImage(samples, w, h, stride, fmt).copy()` at both sites, which lets Qt handle the scanline alignment internally.
-* **Fix redundant page-image copy on every render:** The render callback passed `const QImage &image` down through `renderPageFromImage` → `createAndAddPageItem` → `setImage(const QImage &)`, triggering a full pixel-buffer copy (~3–10 MB per page). Since the `PageRenderResult` is a local value in the callback, the image is now moved with `std::move` all the way into `GraphicsImageItem`, eliminating the copy entirely.
-* **Fix pages appearing blank during fast scrolling:** The scroll handlers (`handleVScrollValueChanged` / `handleHScrollValueChanged`) previously only restarted the 66ms debounce timer on each scroll event, meaning `renderPages()`—and therefore any render requests for newly visible pages—would not fire until scrolling stopped. Visible pages are now queued for rendering immediately on every scroll event via `requestPageRender()`; the debounce timer still fires afterward to handle cleanup (pruning stale renders, removing off-screen items, updating preload pages).
-* **Fix viewport jumping to the wrong page during Ctrl+scroll zoom in multi-page continuous layout:** The zoom path applies a GPU view-transform (`m_gview->scale()`) immediately for O(1) visual feedback, then defers the expensive `repositionPages()` bake to a 66ms debounce timer. During the bake, `resetTransform()` followed by `updateSceneRect()` caused Qt to auto-clamp scrollbar values and emit `valueChanged` on `m_vscroll` / `m_hscroll` before `centerOn()` had a chance to restore the correct viewport position. Because `m_gscene->blockSignals(true)` only suppresses `QGraphicsScene` signals (not scrollbar signals), the scroll handlers fired with an incorrect position, updated the current-page counter, and queued renders for the wrong pages. Fixed by also calling `m_vscroll->blockSignals(true)` / `m_hscroll->blockSignals(true)` around the entire bake critical section and releasing them after `setUpdatesEnabled(true)` at the end of the merged suppression window.
-* **Fix pages disappearing off-screen after zoom in multi-page layout:** After the zoom bake, `centerOn()` (and `GotoPage()` for the gap fallback) were called while scrollbar signals were still blocked. Qt routes scroll position updates through `setValue()` → `valueChanged` → `scrollContentsBy()`, which physically moves the viewport. With signals blocked, that chain was severed; the scrollbar stored the correct target value, but the viewport never moved. This resulted in a blank view after every zoom bake—the pages were correctly positioned in the scene, but the viewport was pointing at empty space. Scrolling manually would trigger `valueChanged`, snapping the viewport to the stored value and revealing the pages. Fixed by unblocking `m_vscroll` / `m_hscroll` signals immediately after `repositionPages()` and before the `centerOn()` / `GotoPage()` call, keeping the block only for the `resetTransform()` + `updateSceneRect()` + `repositionPages()` critical section where spurious scroll events must be suppressed.
+- Fix pages rendering slanted after zoom with RGB pixmaps.
+- Fix a redundant full-page image copy happening on every render.
+- Fix pages appearing blank during fast scrolling.
+- Fix the viewport jumping to the wrong page during Ctrl+scroll zoom in multi-page layout.
+- Fix pages disappearing off-screen after zoom in multi-page layout.
 
 ## 0.7.4
 
 ### New Features
 
-- Add **narrow to region** (Emacs-style). Invoke `narrow_to_region` (or *View → Narrow to
-  Region*) to enter rubber-band selection; the chosen rectangle becomes the entire viewport —
-  scrolling is constrained to it, everything outside is painted over with the background
-  colour, and all interactions (text selection, zoom, search, links) work normally within the
-  region. `widen_region` (or *View → Widen*) restores the full document view. The narrow state
-  survives zoom changes: the region is stored in normalised page-local coordinates and
-  recomputed from the page item's current transform after each re-render. The narrow region is
-  also accessible from the region-selection context menu ("Narrow to Region").
-- Expose `view:narrow_to_region()`, `view:widen_region()`, and `view:is_narrowed() -> boolean`
-  in the Lua view API.
-- Add horizontal and vertical page flip (`flip_horizontal` / `flip_vertical` commands, default
-  bindings `|` / `_`). Flip state is stored in `Model` alongside rotation and propagated
-  through every coordinate-space transform (`buildPageToDevMatrix` / `buildRenderTransform`
-  helpers) so that text selection, link hit-testing, annotation picking, and all other
-  page-space operations remain correct when a document is flipped. All render backends are
-  supported: MuPDF PDF/XPS/CBZ, static images, animated GIFs, and DjVu. Commands are
-  exposed as `view:flip_horizontal()` and `view:flip_vertical()` in the Lua view API.
-- Add `view:region_select(callback)` Lua API. Switches the view into rubber-band
-  selection mode; when the user draws a rectangle the callback receives
-  `{ x, y, w, h }` in scene coordinates and the view returns to normal. The default
-  context menu is bypassed so scripts can use the region for arbitrary purposes.
-- Add "Copy Region as Image (Custom DPI)..." to the region-selection context menu.
-  For PDF and other vector sources the selected region is re-rendered from the cached
-  MuPDF display list at the requested DPI (72–1200, default 300), so the clipboard
-  image is sharp regardless of the current view zoom. Only the selected sub-region is
-  rasterized — not the whole page. Rotation and flip state are preserved in the new
-  render transform. For raster sources (images, DjVu) the existing crop is upscaled
-  using smooth transformation to approximate the requested resolution.
-- Add `lektra.timer` Lua module backed by `QTimer`. Timers are created with
-  `lektra.timer.new(interval_ms, callback [, single_shot])`, support `start`, `stop`,
-  `set_interval`, `set_single_shot`, `is_active`, `is_single_shot`, `interval`, and
-  `destroy`. Timers are parented to the main window so they are cleaned up automatically
-  on shutdown; the `__gc` metamethod ensures the `QTimer` and Lua callback reference are
-  released as soon as the userdata is garbage-collected, making explicit `destroy()` calls
-  optional rather than required.
-- Add `view:rotate_clock()`, `view:rotate_anticlock()`, `view:flip_horizontal()`, and
-  `view:flip_vertical()` to the Lua view API (`lektra.view` methods on `View` userdata).
-  Rotation methods were previously missing from the view API entirely.
-- Implement SyncTeX forward search (editor → lektra). `--synctex-forward` now calls
-  `synctex_display_query` and jumps to the matching PDF location via `GotoLocation`,
-  including deferred-render support. Previously the flag parsed the arguments but never
-  performed the jump (was a TODO).
-- Add `--socket <path>` CLI flag. Starts the IPC server on the given socket path,
-  allowing multiple lektra instances to be addressed independently (analogous to
-  `nvim --listen`). The first invocation with a given socket listens; subsequent
-  invocations with the same socket forward their message and exit.
-- Add `--single-instance` CLI flag. Forces single-instance mode for one invocation
-  without requiring `behavior.single_instance = true` in the config file.
-- `--synctex-forward` now implicitly acts as single-instance: it always attempts to
-  connect to a running instance via IPC regardless of the `single_instance` config
-  setting, preventing duplicate windows when triggered from an editor.
-- SyncTeX forward search via IPC now reuses an already-open tab for the target PDF
-  instead of opening a new one each time. The matching tab is brought to focus and
-  the view jumps to the synctex position in-place.
-- Add **split maximize** (`split_maximize` command). Hides all split panes except the
-  currently focused one, giving it the full tab area. Invoking the command again restores
-  all panes at equal sizes. Focus navigation while maximized (`split_focus_*`) moves
-  the maximized slot to the newly focused pane rather than switching the active pane
-  within a hidden layout. Creating a new split or closing the maximized view
-  automatically restores the layout first. A small corner badge (⊠) is drawn on the
-  maximized view; controlled by `split.maximize_indicator` (bool, default `true`) and
-  `split.maximize_indicator_color` (ARGB, default `0xCC2979FF`). Both options are exposed
-  in the Lua opt API as `lektra.opt.split.maximize_indicator` and
-  `lektra.opt.split.maximize_indicator_color`.
-- Add focus border for the active split pane. Three new `split` config options:
-  `split.focus_border` (bool, default `false`) enables the feature;
-  `split.focus_border_color` (ARGB integer, default `0xFF4FC3F7`) sets the border colour;
-  `split.focus_border_width` (integer, default `2`) sets the thickness in pixels. All three
-  are exposed in the Lua opt API as `lektra.opt.split.focus_border`,
-  `lektra.opt.split.focus_border_color`, and `lektra.opt.split.focus_border_width`.
-- Add `portal.split` config option (`"vertical"`, `"horizontal"`, or `"smart"`).
-  Previously portals always opened in a vertical split. `"smart"` automatically picks
-  vertical when the view is wider than tall and horizontal otherwise.
-- Add `FilePicker` — an Emacs-style find-file picker (`file_picker` command, default
-  binding `Ctrl+Shift+o`). The prompt label shows the current directory (abbreviated
-  with `~`); the search box filters entries in that directory. Typing a path with a `/`
-  separator auto-navigates to the directory part. Tab completes the best match:
-  directories are entered immediately, files are completed in the input. Backspace/Delete
-  on an empty input navigates up one directory.
+- New **Narrow to Region** (Emacs-style) — constrain the viewport to a rubber-band-selected rectangle; `widen_region` restores the full view.
+- New horizontal/vertical page flip (`flip_horizontal`/`flip_vertical`).
+- New `view:region_select(callback)` Lua API for custom region-selection workflows.
+- New "Copy Region as Image (Custom DPI)" context menu action.
+- New `lektra.timer` Lua module backed by `QTimer`.
+- Rotation methods added to the Lua view API.
+- SyncTeX forward search (editor → Lektra) now actually works (previously a stub) and reuses an already-open tab.
+- New `--socket <path>` and `--single-instance` CLI flags.
+- New **split maximize** (`split_maximize`) and a configurable split focus-border.
+- New `portal.split` config option, including a `"smart"` auto-direction mode.
+- New `FilePicker` — an Emacs-style find-file picker (`file_picker`, default `Ctrl+Shift+O`).
 
 ### Bug Fixes
 
-- Fix highlight annotation hover effect triggering on parts of a line before the
-  annotation starts. `HighlightAnnotation` now overrides `shape()` to return the
-  union of its individual segment rects instead of the full bounding rect, so Qt's
-  hover hit-testing only fires when the cursor is actually over a highlighted segment.
-- Fix background colour being overridden by the system palette colour on scroll
-  or zoom. `initGui` was setting the background brush only on `m_gscene`
-  (`QGraphicsScene`), whose `drawBackground()` only fills the scene rect.
-  Viewport areas that fall outside the scene rect (visible when zoomed out or
-  near document edges) were painted with the system palette window colour
-  instead of the configured background. The brush is now set on both `m_gview`
-  (`QGraphicsView`) — which fills the entire viewport — and `m_gscene` so that
-  the narrow-clip strip painting in `GraphicsView::paintEvent` continues to read
-  the correct colour from `scene()->backgroundBrush()`.
-- Fix thumbnail panel defaulting to single-page layout instead of vertical. `handleOpenFileFinished` unconditionally called
-  `setLayoutMode(m_config.layout.mode)` on every file open, overwriting the vertical layout set during thumbnail view construction.
-  The call is now skipped when in thumbnail mode.
-- Fix text-selection quads persisting on screen after navigating to a different page via the thumbnail panel.
-  `GotoPage` now calls `ClearTextSelection()` before rendering in single-page layout mode, where the entire page is replaced.
-- Fix thumbnail page highlight disappearing after the page item is re-rendered (e.g. after a zoom change).
-  `renderPageFromImage` now saves the `isHighlighted()` state of the old item before deleting it and restores it on the newly created item.
-- Fix thumbnail page highlight disappearing when a highlighted page scrolls off-screen and its item is deleted.
-  The highlight state is now re-applied in `renderPageFromImage` whenever an existing highlighted item is replaced,
-  covering both the re-render and the scroll-back-into-view paths.
-- Fix `GoForwardHistory` always returning immediately due to a malformed guard condition. The expression
-  `m_loc_history_index + static_cast<int>(m_loc_history.size())` (a large positive sum, always truthy) was missing a comparison operator;
-  corrected to `m_loc_history_index + 1 >= static_cast<int>(m_loc_history.size())`.
-- Add `behavior.cache_password` config option (default `true`). When
-  auto-reloading a password-protected document, the password entered at open
-  time is reused automatically. Set to `false` to prevent the password from
-  persisting in memory beyond the initial unlock; auto-reload will then fail
-  with an explanatory message for encrypted files.
-- Fix auto-reload from disk being unreliable. Three bugs: (1) the file-stability
-  check compared two `QFileInfo` size readings taken back-to-back with no delay,
-  so it always returned "stable" even while the file was still being written (e.g.
-  latexmk truncates the PDF to 0 bytes before rewriting it); size is now compared
-  across two 100 ms timer ticks. (2) `QFileSystemWatcher::fileChanged` can fire
-  multiple times for a single atomic file replace, spawning concurrent reload
-  chains that caused double reloads; a `m_reload_pending` guard now prevents this.
-  (3) The watcher path was only re-added after a *successful* reload, so a
-  transient corrupt file would permanently stop watching for future saves; the
-  re-add is now unconditional.
-- Fix `--single-instance` CLI flag not triggering IPC forwarding. The probe condition
-  used `readSingleInstanceFromConfig()` (reads the TOML file) and ignored the in-memory
-  flag set by `--single-instance`, so the flag only started a server but never forwarded
-  to an existing instance. Both sources are now combined before the probe runs.
-- Fix SyncTeX IPC tab reuse only searching the root view of each container, missing PDFs
-  open in split panes. Now uses `getAllViews()` to search all views in the container.
-- Fix window title showing `"Argument missing"` warning when `title_format` used `{}`
-  placeholder in the default value (`"{} - lektra"`), which is incompatible with
-  `QString::arg()`. Default changed to `"%1 - lektra"` to match the existing TOML-loading
-  path that already performs the `{}` → `%1` substitution.
-- Fix crash on exit caused by `Lektra::~Lektra()` calling `lua_close(m_L)` before
-  `m_command_manager` was destroyed. Commands registered from Lua hold `LuaRefGuard`
-  `shared_ptr`s whose destructor calls `luaL_unref` — which requires the Lua state to still
-  be alive. `m_command_manager` is now explicitly reset before `lua_close` so those
-  destructors fire in the correct order.
-
-### Improvements
-
-- Change cursor to a crosshair (`Qt::CrossCursor`) when in text-highlight mode, switching
-  to the I-beam only while actively dragging a selection. The default arrow is restored on
-  mode exit.
-- Fix `BrowseLinkItem` hover highlight rendering as nearly-black instead of yellow due to
-  `QColor` being constructed with float literals `(1.0, 1.0, 0.0)` that were implicitly
-  truncated to integers `(1, 1, 0)`. Corrected to `(255, 255, 0, 125)`.
-- Fix internal links targeting page 0 (the first page) being silently ignored. The guard
-  `if (_pageno)` evaluated to false for page 0; corrected to `if (_pageno >= 0)`.
-- Fix float-to-int truncation in `highlightAnnotColor` and `DeleteAnnotationsCommand::undo`
-  where `static_cast<int>(x * 255)` could produce off-by-one values (e.g. 254 instead of
-  255). Now uses `qRound()`.
-- Remove duplicate non-const `Model::DPI()` overload that shadowed the canonical
-  `[[nodiscard]] const` version and caused the `[[nodiscard]]` attribute to be bypassed on
-  non-const `Model` objects.
-- `supports_save()`, `supports_encryption()`, `supports_decryption()`, and `isImage()` in
-  `Model` were not marked `const noexcept` despite being pure queries with no side effects.
-- Z-value and zoom-limit constants in `DocumentView` were defined as preprocessor macros
-  (`#define`); replaced with typed `static constexpr` values.
-- `m_spacing` in `DocumentView` was declared `double` but initialized with a `float`
-  literal (`10.0f`); corrected to `int`.
-- `BrowseLinkItem::_uri` was a raw `char*` with no ownership contract, risking dangling
-  pointer access when MuPDF frees the underlying string. Changed to `QString` with a
-  `const QString &` setter.
-
-### Bug Fixes (Model / DocumentView)
-
-- Fix `highlightAnnotColor` in `Model` using `static_cast<int>(x * 255)` which could
-  produce off-by-one color values; corrected to `qRound()`.
-- Fix `removeAnnotComment` declared in `Model.hpp` but never implemented; added the
-  missing definition in `Model.cpp`.
-- Fix duplicate `"Animated"` entry being pushed twice into the properties list for image
-  files in `Model::properties()`; removed the redundant line.
-- Fix `get_obj_num_at_rect` calling `pdf_load_page` without any `fz_try`/`fz_catch`
-  guard, which could crash on a malformed PDF or out-of-range page number. Wrapped in
-  `fz_try`/`fz_always`/`fz_catch` with proper page cleanup.
-- Fix `getFirstCharPos` using `return` inside an `fz_try` block (bypassing `fz_always`
-  cleanup) and manually dropping `page` and `stext_page` before returning, causing a
-  double-free when combined with the `fz_always` block. Replaced with a `found` flag that
-  exits the nested loops normally so `fz_always` performs the single correct cleanup.
-- Fix `ScrollDown_HalfPage` and `ScrollUp_HalfPage` using `m_page_items_hash[m_pageno]`
-  which silently inserts a null entry and immediately dereferences it, causing a crash when
-  the current page is not yet rendered. Changed to `.value(m_pageno, nullptr)` with a null
-  guard.
-- Fix `renderAnnotations` and `renderLinks` using `m_page_items_hash[pageno]` (inserting
-  null on miss) instead of `.value(pageno, nullptr)`.
-- Fix `annotColorChangeRequested` lambda in `renderAnnotations` querying
-  `m_model->getAnnotColor(m_pageno, ...)` using the current page instead of the captured
-  `pageno`, returning the wrong color for annotations on non-current pages.
-- Fix `renderLinks` early-return guard using `&&` across all three conditions, meaning an
-  unsupported-links model only skipped rendering when the other two conditions also held.
-  Split into two independent guards.
-- Fix `clearVisiblePages` removing scene items without deleting them, leaking every
-  `GraphicsImageItem` on document close or reload. Added `delete item` before
-  `removeItem`, consistent with `clearVisibleLinks` and `clearVisibleAnnotations`.
-- Fix `ensureSearchItemForPage` returning a cached item only when text search is *not*
-  supported — the condition was inverted. Corrected to `if (supports_text_search() && ...)`.
-- Fix `Copy_page_image` calling `pageAtScenePos` with a widget-space `QPoint` from
-  `viewport()->rect().center()` instead of a scene-space coordinate; the result was
-  immediately overwritten by the correct call. Removed the dead first call.
-
-### Bug Fixes (DocumentContainer)
-
-- Fix `focusView()` skipping assignment of `m_current_view` when it was `nullptr` — the
-  guard `if (m_current_view && m_current_view != view)` required a non-null current view,
-  so the first focus call after construction never set `m_current_view` or emitted
-  `currentViewChanged`. Corrected to `if (m_current_view != view)` with a separate null
-  check before deactivating the old view.
-- Fix `closeView()` emitting `viewClosed` before `m_current_view` was updated, so any slot
-  responding to the signal would observe a stale (already deleted) current view. Moved the
-  `emit viewClosed(view)` to after the `m_current_view` reassignment block in both branches.
-- Fix `closeThumbnailView()` and `focusThumbnailView()` being empty stubs that only checked
-  for a null `m_thumbnail_view` and returned. Replaced with inline implementations delegating
-  to `closeView(m_thumbnail_view)` and `focusView(m_thumbnail_view)` respectively.
-- Fix `createThumbnailView()` connecting the `viewClosed` lambda without
-  `Qt::UniqueConnection`, causing the lambda to accumulate duplicate connections on repeated
-  calls. Added `Qt::UniqueConnection` to the `connect` call.
-
-### Performance / Code Quality (DocumentContainer)
-
-- `thumbSize = totalSize * 0.15` in `equalizeStretch` silently truncated a `double` result
-  to `int`; changed to `static_cast<int>(totalSize * 0.15)`.
-- The QSplitter handle stylesheet string `"QSplitter::handle { background-color: palette(mid); }"`
-  was duplicated across five call sites in `DocumentContainer.cpp`; extracted to a
-  `static const char *const SPLITTER_STYLESHEET` at file scope.
-
-### Performance / Code Quality (Model / DocumentView)
-
-- `HSCROLL_STEP` and `VSCROLL_STEP` in `DocumentView.cpp` were preprocessor macros;
-  replaced with `static constexpr int`.
-- `switch ((int)m_model->rotation())` used a C-style cast; changed to `static_cast<int>`.
-- `img.save(fileName, format.toStdString().c_str())` created a temporary `std::string`
-  to obtain a `const char*`; changed to `format.toLatin1().constData()`.
-- `PageDimensionCache::reset()` assigned integer `0` to a `vector<bool>`; corrected to
-  `false`. C-style casts `(int)` in `set()`, `getOrDefault()`, and `get()` replaced with
-  `static_cast<int>`.
-- Redundant `reserve()` calls before copy-assignment of `links` and `annotations` vectors
-  in `renderPageWithExtrasAsync` removed; copy-assign allocates its own storage.
-
-### Performance / Code Quality
-
-- `LRUCache::put` unconditionally called `remove(key)` before every insert, incurring a
-  redundant map lookup for the common new-key path. Inlined the existence check to avoid
-  the extra traversal.
-- `trim_ws` in `utils.hpp` trimmed leading whitespace with a per-character `erase` loop
-  (O(n²)); replaced with a single `erase(begin, find_if_not(...))` call.
-- `GraphicsImageItem::height()`, `quad_y_center()`, and `charEqual()` were missing
-  `noexcept` despite being trivially non-throwing; added for consistency with surrounding
-  functions.
-- `Show_highlight_search()` and `Show_annot_comment_search()` used `&&` instead of `||`
-  in their null-guard (`!m_doc && !m_doc->model()->...`), causing a null pointer
-  dereference when `m_doc` was null. Corrected to `||`.
-- `Tab_goto` bounds check used `||` instead of `&&` (`index > 0 || index < count`),
-  making the condition almost always true and allowing out-of-range indices to pass.
-  Corrected to `index >= 1 && index <= count`.
-- `ShowAbout` leaked an `AboutDialog` instance on every call since the dialog was
-  heap-allocated but never freed. Added `WA_DeleteOnClose` so each dialog self-destructs
-  when closed.
-- `OpenFilesInNewTab` warning message claimed extra files would be processed with no
-  callback, but the function returned immediately. Message updated to accurately state
-  that the operation is aborted.
-- `std::move` was called on a `const QStringList &` parameter in `OpenFilesInNewTab`,
-  `OpenFilesInVSplit`, and `OpenFilesInHSplit`, silently falling back to a copy.
-  Corrected to plain assignment; the lambda captures in VSplit/HSplit now move `qfiles`
-  correctly.
-
-- Fix `n`/`N` search navigation skipping hits on the current page and jumping directly to
-  the next/previous page. `getClosestHitIndex` now steps by flat hit index when the current
-  hit is on the visible page, falling back to page-level anchoring only when the user has
-  scrolled to a different page.
-- Scrollbars are kept visible while search hit markers are drawn on them
-  (`scrollbars.search_hits = true`). The auto-hide timer and mouse-leave events no longer
-  dismiss the scrollbar during an active search; normal auto-hide resumes once the search
-  is cancelled or cleared.
-- Fix jump marker rendering at the wrong position after a zoom change. The marker's
-  location is now stored as a `PageLocation` (page + document-space coordinates) instead
-  of a scene-space point, so `Reshow_jump_marker` recomputes the correct scene position
-  at call time regardless of zoom level.
+- Fix highlight annotation hover effect triggering outside the actual highlighted text.
+- Fix background colour reverting to the system palette on scroll/zoom.
+- Fix thumbnail panel defaulting to single-page layout instead of vertical.
+- Fix stale text-selection and page-highlight artifacts in the thumbnail panel.
+- Fix Back/Forward history navigation being broken by a malformed condition.
+- New `behavior.cache_password` option controlling whether a password persists across auto-reloads.
+- Fix auto-reload from disk being unreliable (premature "file stable" detection, duplicate reload chains, watcher not always re-armed after a bad reload).
+- Fix `--single-instance` not actually forwarding to an existing instance.
+- Fix SyncTeX IPC tab reuse missing PDFs open in split panes.
+- Fix a window-title formatting warning.
+- Fix a crash on exit caused by Lua cleanup ordering.
+- Numerous smaller internal correctness fixes across `Model`/`DocumentView`/`DocumentContainer` (colour rounding, inverted null-guards, memory leaks, crash guards around malformed PDFs).
 
 ## 0.7.3
 
-### Features
+### New Features
 
-- Add **Comment** to the text selection context menu. Selecting text and choosing Comment
-  now opens an input dialog, then creates a highlight annotation with the comment embedded
-  as a single undoable operation — no need to first highlight and then right-click the
-  annotation to add a comment.
-- Add **Copy Text** to the highlight annotation context menu. Copies the exact highlighted
-  text to the clipboard by testing each character's centre against the annotation's quad
-  points, using the cached stext page so no extra parsing is needed.
-- Ability to open multiple files using file dialog to open in new tab, vsplit or hsplit.
-- `DocumentView` no longer inherits `QOpenGLWidget` — it is a plain `QWidget` that hosts
-  the `GraphicsView`; all GPU work goes through the view's own `QOpenGLWidget` viewport.
-- Touch events are now correctly re-applied to the new viewport after `applyBackend()`
-  replaces it.
-- A global `QSurfaceFormat` (depth 24, stencil 8) is set before `QApplication`
-  construction to ensure a well-formed OpenGL context on all platforms.
-
-#### Lua API
-
-- New dispatch event
-    - `OnShutdown` - Dispatched when the application is shutting down
-- Event callbacks now receive typed arguments instead of a raw `Lektra` pointer for
-  events where more specific data is available:
-    - `OnScreenChanged` — callback receives a `ScreenInfo` table with fields:
-      `name`, `dpr`, `logical_dpi`, `physical_dpi`, `refresh_rate`, and
-      `geometry` (`{x, y, w, h}`)
-    - `OnTabChanged`, `OnTabRemoved` — callback receives the tab index as an integer
-- Lua stubs: `ScreenInfo` class added with full field annotations
+- New **Comment** action on text selection — highlight and add a comment in one step.
+- New **Copy Text** action on highlight annotations.
+- The file dialog can now open multiple files at once into a new tab/vsplit/hsplit.
+- Lua: new `OnShutdown` event; several event callbacks now receive typed data instead of a raw pointer.
 
 ### Bug Fixes
 
-- **Save File** menu action is now enabled only when the document has unsaved changes,
-  providing a clear visual signal of modified state. A new `modifiedChanged(bool)` signal
-  on `DocumentView` drives the update so the menu reacts immediately on each edit.
-- **File Properties** menu action is now enabled for all open file types, not just PDF.
-- **Back / Forward** history navigation actions are now enabled only when there is actually
-  somewhere to navigate: `canGoBack()` and `canGoForward()` methods were added to
-  `DocumentView`, a `historyChanged()` signal is emitted from `addToHistory`,
-  `GoBackHistory`, and `GoForwardHistory`, and a dedicated
-  `updateHistoryNavigationActions()` keeps the menu items in sync on every history change
-  and on tab switch.
-- **Invert Colour** menu item checked state is now synced on tab switch. Previously
-  switching between tabs with different invert states left the checkbox stale; it is now
-  updated in `updateUiEnabledState`.
-- Fix annotation comment edits (right-click annotation → Add Comment) not being tracked by
-  the undo stack. Comments are now pushed as `AnnotCommentCommand` entries, so they can be
-  undone/redone correctly and the modified indicator stays in sync.
-- Fix save being available after a save → undo → redo cycle. The undo stack correctly
-  returns to its clean index on redo, but MuPDF's internal mutation tracker still reported
-  unsaved changes because it sees the undo and redo as two separate edits. `SaveFile` now
-  uses `m_is_modified` (driven by the undo stack's clean state) rather than
-  `pdf_has_unsaved_changes` to decide whether a save is needed.
-- Fix zoom glitch in multi-page document mode: interactive zoom (pinch/scroll) now uses an
-  O(1) GPU view-transform (`QGraphicsView::scale`) for each step, deferring the O(n)
-  `repositionPages()` call until the scroll-debounce timer settles. This eliminates the
-  jarring per-page resize flash that was visible during zoom.
-- Fix multi-page text selection breaking when scrolling: pages within the active selection
-  range are now protected from eviction by `removeUnusedPageItems`, preventing gaps in the
-  rendered quads and `pageAtScenePos` failures on the anchor page.
-- Fix fit mode not working properly for images/djvu files after rotating
-- Fix pickers (command palette, outline, bookmarks, etc.) leaking key events and shortcuts
-  to the focused `DocumentView` while open. Pickers now grab the keyboard on launch and
-  install an application-level event filter to swallow `QShortcutEvent`s, both of which
-  are released on dismiss or item acceptance.
-- Fix `InputDialog` ok and cancel buttons looking flat and weird.
-- Render highlight annotations spanning multiple lines correctly by splitting the annotation quad into separate quads
-  for each line. Previously, single rectangular quad spanning the multi-line highlight was rendered.
+- Save File menu action now only enabled when there are actually unsaved changes.
+- File Properties now available for all file types, not just PDF.
+- Back/Forward history actions now correctly enabled/disabled based on whether there's somewhere to go.
+- Invert Colour menu checkbox now stays in sync across tab switches.
+- Fix annotation comment edits not being tracked by undo/redo.
+- Fix Save being offered again after a save → undo → redo cycle.
+- Fix a zoom glitch and text-selection breakage while scrolling in multi-page mode.
+- Fix fit mode not working for images/DjVu after rotating.
+- Fix pickers leaking keyboard shortcuts to the document view while open.
+- Multi-line highlight annotations now render as separate quads per line instead of one box spanning the gap between them.
 
 ## 0.7.2
 
-### Features
+### New Features
 
-- Add Lua API `view:export_highlights(path)` that serialises all highlight annotations to
-  a JSON file. Each entry contains `page` (1-based), `text`, and optionally `comment`.
-  Returns `true` on success or `nil, error` on failure.
+- New Lua API `view:export_highlights(path)` — export all highlight annotations to JSON.
+- SVG files now render via librsvg + Cairo when available (falls back to Qt's renderer), fixing several rendering gaps.
+- DjVu support is now detected at runtime instead of requiring a compile-time flag.
 
 ### Bug Fixes
 
-- Fix crash when right-clicking on the overlay scrollbar — right-click events were
-  unconditionally forwarded to the scrollbar, causing its built-in context menu
-  (`QMenu::exec`) to spin a nested event loop while `GraphicsView::contextMenuEvent`
-  also fired, leading to a double-menu crash. Non-left-button clicks on the scrollbar
-  are now silently ignored.
-- Fix animated GIF frames being skipped: `QImageReader::read()` auto-advances the frame
-  position for animated formats, so the subsequent `jumpToNextImage()` call was
-  double-advancing and skipping every other frame.
-- Fix animated GIF playback running at ~1.5× speed: the elapsed clock was started before
-  the first timer fired, so the first callback measured ~100 ms of wait time as "render
-  overhead" and scheduled the next frame at 0 ms delay. Subsequent frames alternated
-  between 0 ms and ~95 ms, averaging half the intended interval. The clock is now
-  restarted at the top of each callback so it measures only actual render overhead.
-- Fix image files always rendering blurry: pixel dimensions were stored directly as
-  typographic points in the page dimension cache, causing `pageSceneSize` and
-  `repositionPages` to apply an extra ×(dpi/72) upscale on every render. Dimensions
-  are now converted to pts (`px * 72 / dpi`) on load, matching the DjVu path.
-- Fix image zoom leaving blurry pixels: `setZoomAnchored` for images only applied a
-  Qt scene-transform scale and never triggered a pixel-level re-render. The HQ render
-  timer is now started after each anchor zoom so that, once zoom settles, `renderImage`
-  re-renders at the exact target dimensions using `Qt::SmoothTransformation`.
-- Add `collectHighlightTexts()` on `Model` returning a `std::vector<HighlightText>` with
-  `page`, `text`, `comment`, and `quad` fields. Multi-line highlights are grouped into a
-  single entry (lines joined with a space) rather than one entry per line.
-
-### Performance
-
-- Animated GIF memory usage reduced from O(all frames) to O(1 frame): switched from
-  pre-decoding every frame into a `QList<QImage>` buffer to `QMovie` with
-  `CacheMode::CacheNone`, which decodes one frame at a time on demand. The manual
-  timer and elapsed-clock machinery is replaced by `QMovie::frameChanged`.
-
-### SVG Rendering
-
-- SVG files are now rendered via librsvg + Cairo when available, with automatic fallback
-  to Qt's `QSvgRenderer`. librsvg is probed at runtime using `QLibrary` (no build-time
-  dependency, no configuration flag) — if `librsvg-2.so.2` and `libcairo.so.2` are
-  installed on the system they are used automatically, otherwise rendering falls back
-  silently. librsvg handles CSS class-based styles, `<switch>` fallback elements, and
-  CSS functions such as `light-dark()` that Qt's renderer ignores, producing correct
-  output for SVGs generated by tools like draw.io.
-
-### DjVu
-
-- DjVu support is now detected at runtime via `QLibrary` instead of requiring a
-  compile-time `WITH_DJVU` flag and a link-time dependency on libdjvulibre.
-  If it is installed on the system, DjVu files are opened automatically;
-  if it is absent, DjVu is silently unavailable. The `WITH_DJVU` CMake option and the
-  `HAS_DJVU` preprocessor define have been removed.
+- Fix a crash right-clicking the overlay scrollbar.
+- Fix animated GIF frames being skipped and playing back too fast.
+- Fix image files always rendering blurry, including after zoom.
+- Animated GIF memory usage reduced from holding every frame in memory to one frame at a time.
 
 ### Breaking Changes
 
-- **Remove `ImageMagick` dependency as it's a headache to maintain and to link against for cross-platform compatibility.**
-- Removed `lektra.capabilities` table as it's not useful
+- Removed the ImageMagick dependency.
+- Removed the unused `lektra.capabilities` Lua table.
 
 ## 0.7.1
 
-### Features
+### New Features
 
-- Auto scroll on text selection mode to keep the selection in view when selecting text
-  with the mouse or keyboard, which provides a smoother and more intuitive text selection experience,
-  especially for longer documents where the selected text may go out of view.
-- Add optional lua scripting support (experimental, work in progress)
-    - API overview
-        - `lektra.opt` - for getting and setting config options
-        - `lektra.cmd` - for command related stuff
-        - `lektra.ui`  - for UI related stuff (e.g. showing notifications, input dialogs, etc.)
-        - `lektra.tabs` - for managing tabs
-        - `lektra.event` - for subscribing to events (e.g. page change, file open, etc.)
-        - `lektra.keymap` - for managing keybindings
-        - `lektra.mousemap` - for managing mousebindings
-        - `lektra.utils` - for utility functions
-        - `lektra.version` - for version functions
-        - `lektra.capabilities` - for querying about compiled options
-        - `lektra.bookmarks` - for managing bookmarks
-
-    - Check [LUA-WIKI.md](LUA-WIKI.md) for more details and examples of the lua scripting support in LEKTRA.
-
-- Vim/Emacs like search hit indexing navigation if `absolute_jump = false` in `[search]`
-- Add bookmarks support with a bookmark picker to view and manage bookmarks. Bookmarks allow users to save specific locations
-  in the document for quick access later.
-- New bookmark related commands:
-    - `bookmark_add` to add a bookmark at the current location
-    - `bookmark_remove` to remove a bookmark at the current location
-    - `bookmarks` to open the bookmark picker with the list of bookmarks in the document
-- Add image rotation support
-- Add missing implementation for `single_instance` option. Now if `single_instance` is enabled, new files will use the
-  existing instance of LEKTRA instead of opening a new instance, which allows for better management of
-  multiple documents and prevents cluttering the taskbar with multiple instances of LEKTRA.
+- Auto-scroll to keep the text selection in view while selecting with mouse or keyboard.
+- Experimental Lua scripting support added (`lektra.opt`, `.cmd`, `.ui`, `.tabs`, `.event`, `.keymap`, `.mousemap`, and more — see `LUA-WIKI.md`).
+- Vim/Emacs-style search-hit index navigation (`search.absolute_jump = false`).
+- New bookmarks support (`bookmark_add`, `bookmark_remove`, `bookmarks` picker).
+- Image rotation support.
+- `single_instance` now actually works — new files open in the existing instance.
 
 ### Bug Fixes
 
-- Fix crash when right-clicking on the overlay scrollbar — right-click events were unconditionally
-  forwarded to the scrollbar, causing its built-in context menu (`QMenu::exec`) to spin a nested
-  event loop while the GraphicsView's `contextMenuEvent` also fired, leading to a double-menu crash.
-  Non-left-button clicks on the scrollbar are now silently ignored.
-- Update the layout menu item names
-- Fix crash (SEGV) on click selection in `SINGLE` layout mode — `pageAtScenePos` was
-  guarding the `outPageItem` assignment with `if (outPageItem)`, but the pointer is always
-  `nullptr` at that point, so `pageItem` was never set and `mapFromScene` dereferenced null.
-- Fix wrong text selection after zoom in `SINGLE` layout mode — `setZoomAnchored` called
-  `repositionPages()` (which scales the old item as a visual intermediate) but never
-  triggered a re-render, leaving the page item permanently at a non-unity scale. Because
-  `mapFromScene` divides by the item scale, selection coordinates were passed to
-  `computeTextSelectionQuad` in the wrong zoom space. Fixed by calling `renderPage()` for
-  `SINGLE` mode after `repositionPages()` in `setZoomAnchored`.
-- Fix fit mode not working if image files are opened
-- Fix memory leak in `extractText` function in `Model` class
-- Add UTF-8 text conversion for file paths on Windows to fix issues with opening files with non-ASCII characters in their paths on Windows.
-- Reset `m_success = false` at the start of every open in `Model.cpp`
-- [DocumentView.cpp] Made the future watcher connection single-shot and cleared stale connections before reconnecting and
-  added a guard in `handleOpenFileFinished()` so it exits early if the model did not actually open the file.
-- Add missing `page` config section loading from the config
-- Fix visual line mode navigation to be more naturally
-- Fix context menu on tabs not working
-- Fix opening files in containers with already open file not loading.
-- Fix `openSessionFromArray` function loading files incorrectly and breaking
-- Fix segfault in `buildPageCache` because of double free of mupdf context
-- Add implementation for `file_reload` command
-- Fix synctex initialisation
-- Fix synctex optional macro in the source code `HAS_SYNCTEX` -> `WITH_SYNCTEX`
-- Fix image zoom anchoring
-- `lua/Lektra.cpp`: Fix stack leak in `executeLuaCode` — the message-handler function was
-  pushed before `luaL_loadstring` but never popped, growing the Lua stack by one slot on
-  every call. Replaced with `lua_settop` save/restore and removed the broken handler
-  (which returned 0 instead of the required 1 value). Also fixed `toStdString().c_str()`
-  to a stable `QByteArray` local.
-- `lua/view.cpp`: Fix `open` method reading `lua_upvalueindex(1)` with zero upvalues —
-  caused undefined behaviour/crash. Now resolves the `Lektra` instance via
-  `qobject_cast<Lektra*>((*view)->window())`.
-- `lua/view.cpp`: Fix `fit`, `mode`, and `layout` getter methods returning `0` (no values)
-  after pushing a value onto the stack — callers received garbage. Changed to `return 1`.
-- `lua/view.cpp`: Fix `goto_location` applying a page-index offset twice: `pageno` was
-  already converted to 0-based, then subtracted again before passing to `GotoLocation`,
-  sending page 1 to index −1.
-- `lua/view.cpp`: Fix `zoom` containing unreachable `return 0` after `return 1` in both
-  branches. Collapsed to a single push + `return 1`.
-- `lua/view.cpp`: Fix `set_invert` returning 1 in the success branch without pushing
-  anything — now returns 0 (setter, no return value).
-- `lua/view.cpp`: Replace empty stub bodies in `set_mode` and `save_as` with
-  `luaL_error` so callers get a clear error instead of silent no-ops.
-- `lua/event.cpp`: Fix `unregister` API mismatch — it expected `(string, int)` but
-  `register` returns only an `int` handle. Unified to `(EventType, handle)` matching the
-  `register` signature.
-- `lua/event.cpp`: Fix `once` taking a string event name while `register` takes an integer
-  `EventType`. Both now use integer `EventType` for consistency.
-- `lua/event.cpp`: Fix `COUNT` sentinel exposed in the `lektra.event.EventType` Lua table
-  due to an off-by-one `<=` in the population loop. Changed to `<`.
-- `lua/event.cpp`: Fix `once` callbacks never being removed — `is_once` flag was set but
-  `dispatchLuaEvent` never checked it, so the callback would fire on every subsequent
-  dispatch (pushing nil after the first unref). Moved cleanup into `dispatchLuaEvent`
-  using an erase-remove pass after invocation.
-- `lua/event.cpp`: Fix iterator invalidation in `dispatchLuaEvent` — callbacks could call
-  `unregister` during iteration. Now iterates over a local copy of the callback list.
-- `lua/cmd.cpp`: Fix Lua registry reference leak on command unregister — `func_ref` was
-  captured in the action lambda but `luaL_unref` was never called when the command was
-  removed. Wrapped in a `shared_ptr` guard whose destructor calls `luaL_unref`.
-- `include/DispatchType.hpp`: Fix duplicate `OnPageChanged` key in the dispatch map —
-  the second entry silently overwrote the first in `QHash`.
-- `include/DispatchType.hpp`: Rename reserved identifier `__dispatchEventMap` (double
-  leading underscore is reserved by the C++ standard) to `s_dispatchEventMap`.
-- `include/DispatchType.hpp`: Replace O(n) linear scan in `dispatchTypeToString` with an
-  O(1) static array indexed by enum value.
+- Fix a crash right-clicking the overlay scrollbar.
+- Fix a crash on click-to-select in single-page layout mode.
+- Fix wrong text selection after zoom in single-page layout mode.
+- Fix fit mode not working for images.
+- Fix a memory leak in text extraction.
+- Fix non-ASCII file paths failing to open on Windows.
+- Fix numerous bugs across the new Lua `view`/`event`/`cmd` APIs (stack leaks, wrong argument counts, dead code paths, reference leaks) — the scripting API was new this release and got a thorough shakeout.
+- Numerous smaller fixes: visual line mode navigation, tab context menu, opening files into an already-populated container, session loading, a crash in page-cache building, SyncTeX initialization, image zoom anchoring.
 
 ### Performance
 
-- `lua/view.cpp`: Implement `view:outline()` — returns the document table of contents as a
-  recursive Lua table tree. Each entry has `title`, `pageno` (1-based, `nil` for external
-  links), `x`, `y`, and a `children` array for nested headings.
-- `Model.cpp` / `DocumentView.cpp`: Overhaul animated image (GIF) playback performance:
-  - **Two-pass open**: `pingImages` reads frame count and per-frame delays from headers only
-    (no pixel I/O). A single `[0]` scene read then decodes frame 0 and emits
-    `openFileFinished` immediately, so the image appears without waiting for the full decode.
-    Remaining frames are decoded in a background thread via `readImages` + `coalesceImages`.
-  - **Remove dead `getAnimatedFrame`**: the function re-read and re-coalesced the entire file
-    from disk on every call just to produce one frame. It was never called; removed entirely.
-  - **Eliminate `m_image_cache` indirection for animated frames**: `setCurrentAnimFrame` now
-    only updates `m_current_frame`; `requestImageRender` reads directly from
-    `m_animated_frames[m_current_frame]`, removing a per-advance QImage copy.
-  - **Remove unconditional `qDebug` in `setCurrentAnimFrame`**: the debug log fired on every
-    frame advance (30+ times per second in all build configurations).
-  - **Fix `cleanup_image` not resetting animated state**: `m_animated_frames`,
-    `m_frame_delays_ms`, `m_frame_count`, and `m_current_frame` were left populated when
-    switching away from an animated image.
-  - **Frame-skip during startup**: the playback timer skips frames that have not been decoded
-    yet (background decode still in progress) instead of displaying a blank frame.
-  - **Elapsed-time frame scheduling**: the animation timer now subtracts actual render time
-    from the next frame's nominal delay via `QElapsedTimer`, keeping the playback cadence
-    on schedule even when individual frames render slowly.
-  - **Free raw Magick frames early**: in the background decode path, the raw `readImages`
-    vector is cleared immediately after `coalesceImages` so decoded-but-uncompressed Magick
-    memory is released before the QImage conversion loop begins.
-
-- `DocumentView.cpp`: Replace `QGraphicsItem::data(0).toString()` tag checks with `QSet<int>`
-  membership tests (`m_placeholder_pages`, `m_preload_pages`) eliminating repeated
-  `QVariant`→`QString` conversions in hot loops inside `removeUnusedPageItems`,
-  `repositionPages`, and `renderPages`.
-- `DocumentView.cpp`: Split the single render queue into a visible-page queue and a preload
-  queue so `startNextRenderJob` dequeues in O(1) instead of doing an O(n) linear scan with
-  an O(n) `removeAt` to find the next visible page to render.
-- `DocumentView.cpp`: Eliminate `QHash::keys()` heap copies in `removeUnusedPageItems`,
-  `clearVisibleLinks`, and `clearVisibleAnnotations`; replaced with direct iteration or a
-  two-pass collect-then-delete approach.
-- `DocumentView.cpp`: Cache the last rendered search-hit state (`index` + page-item pointer)
-  in `updateCurrentHitHighlight` so the path is only recomputed when the hit or page item
-  actually changes, avoiding redundant `QPainterPath` rebuilds on every scroll event.
-- `Model.cpp`: Skip redundant `line_length()` traversal in `find_closest_in_page` for lines
-  with no characters — the call always returned 0 so the `idx` increment was a no-op.
-- `Model.cpp`: Hoist `m_inv_dpr` scale constant out of the per-link and per-annotation render
-  loops in `renderPageWithExtrasAsync`; add `reserve` on `result.links` and
-  `result.annotations` before those loops to avoid reallocation churn on pages with many
-  links or annotations.
-- `Lektra.cpp`: Hoist `findChildren<QShortcut *>()` out of the per-key loop in
-  `setupKeybinding` — was performing a full child-object tree traversal once per key;
-  now called once before the loop with deleted entries removed in-place to avoid dangling
-  pointers.
-- `Lektra.cpp`: Replace the temporary `QStringList() << "*.json"` filter construction in
-  `getSessionFiles` with a `static const QStringList`, eliminating a heap allocation on
-  every call.
+- New Lua `view:outline()` API.
+- Major animated-GIF playback overhaul: two-pass open (shows the first frame immediately, decodes the rest in the background), removed dead code, eliminated redundant per-frame copies, fixed playback timing drift.
+- Various hot-path optimizations in rendering and keybinding setup.
 
 ### Breaking Changes
 
-- Remove `placeholder_text` option from `[command_palette]` section of the config.
-- Add `prompt` option in `[picker]` common to all pickers, which allows for a
-  customizable prompt text shown next to the input field.
-- Rename `always_open_in_new_window` to `single_instance`.
-- C++ version requirement has been downgraded to C++20 (previously it was C++23) to allow
-  for wider compatibility with different platforms and compilers, as C++20 is now widely
-  supported by most modern compilers and platforms, while C++23 is still very new and not yet
-  supported on many platforms.
+- Removed `placeholder_text` from `[command_palette]`; added a common `prompt` option to `[picker]` instead.
+- Renamed `always_open_in_new_window` to `single_instance`.
+- Minimum C++ standard lowered to C++20 for wider compiler/platform support.
 
 ## 0.7.0
 
 ### Features
 
-- **Synctex** is now bundled with LEKTRA instead of using the system installed synctex,
-  which should improve synctex support and make it available on all platforms without requiring users
-  to install synctex separately. This can be disabled by passing `--without-synctex` in the configure script.
-- Add optional `Imagemagick` image rendering library support for handling more image file formats.
-    - **Requires ImageMagick to be installed on the system and `Magick++` development libraries for compilation.**
-- Animated image support (e.g. animated GIFs, WEBP, AJPG) using `ImageMagick` for rendering.
-- Hide unrelevant actions from the menu bar based on the file type of the currently opened document.
-
-- Add `Windows` operating system support
-- Add "pan" mouse action in `[mousebindings]` section.
-    Used for panning around the page my clicking and dragging the mouse
-
-    Example:
-
-    ```toml
-    [mousebindings]
-    pan = "Alt+LeftButton"
-    ```
-
-- New actions in `[picker.keys]` section:
-    - `expand`: if on a heirarchy node, expand it (in `flat_mode = false`) (default: `Tab`)
-    - `collapse`: if on a heirarchy node, collapse it (in `flat_mode = false`) (default: `Tab`)
-    - `section_prev`: move to the previous section (e.g. previous chapter in the outline picker) (default: `Ctrl+Shift+k`)
-    - `section_next`: move to the next section (e.g. next chapter in the outline picker) (default: `Ctrl+Shift+j`)
-
-- Default mouse bindings:
-    - `pan` => `Alt+LeftButton`
-    - `preview` => `Alt+Shift+LeftButton`
-    - `portal` => `Ctrl+LeftButton`
-    - `synctex_jump` => `Shift+LeftButton`
-
-- Searching now searches from the current page/location to the end of the document.
+- SyncTeX is now bundled instead of relying on a system install.
+- Optional ImageMagick support for more image formats, including animated GIF/WEBP/AJPG.
+- Menu bar now hides actions irrelevant to the currently open file type.
+- Windows support added.
+- New `pan` mouse action (drag to pan the page).
+- New picker keybindings for hierarchy expand/collapse and section navigation.
+- New default mouse bindings for pan/preview/portal/synctex-jump.
+- Search now starts from the current location instead of the beginning of the document.
 
 ### Bug Fixes
 
-- Add ImageMagick to the `AboutDialog`'s `libraries used` section
-- Stop animated image playback when not visible (different tab) to save resources and avoid unnecessary CPU usage.
-- Hide mode, color and progress info in the statusbar when in non-supported file types (e.g. images) to avoid confusion
-- Fix `invert color` menu button not working
-- Make search behave more like in vim/emacs
-- Fix linux `#ifdef`s
-- Set minimum size for the `InputDialog` widget
-- Remove redundant file dialog formats
-- Picker `next`, `prev` navigation now goes through all the items instead of just the top level items when in `flat_mode = false` (hierarchical mode),
-  which makes navigation in the picker more intuitive and consistent regardless of the mode.
-- Picker not navigable when search bar is opened. (Issue reported by: [@linewaytin](https://codeberg.org/linwaytin))
-- Fix `--check-config` not working with `[keybindings]`, `[mousebindings]` sections. (Issue reported by: [@lineick](https://github.com/lineick))
-- Don't null out the statusbar item spacings which caused the statusbar items to have 0 padding and look weird.
-- Fix `ColorDialog` not showing up the colored buttons.
-- Make `RecentFilesPicker` be flat structured by default instead of hierarchical (it makes more sense to have flat structure)
-- Handle `Esc` key to quit open pickers.
+- ImageMagick added to the About dialog's library list.
+- Animated image playback now pauses when its tab isn't visible.
+- Statusbar mode/colour/progress info hidden for unsupported file types.
+- Fix Invert Colour menu button not working.
+- Search behavior made more vim/emacs-like.
+- Picker navigation fixed in hierarchical mode and while the search bar is open.
+- Fix `--check-config` not covering `[keybindings]`/`[mousebindings]`.
+- Fix statusbar item padding and `ColorDialog` button rendering.
+- `Esc` now closes open pickers.
 
 ### Breaking Changes
 
-- Remove `search_from_here` command as it's not useful anymore since the default behavior is to search from the current location.
-- Move `sessions` and `last_pages.json` file to `QStandardPaths::AppDataLocation` for better compliance with platform standards for application data storage
-  (previously stored in the `QStandardPaths::AppConfigLocation`, which is meant for configuration files).
-- Remove LLM support (current implementation was not good), but it will be added back in the future with a better implementation.
-- Removed shell scripts support as it was never implemented and there are no current plans to implement it.
-
-#### Config changes:
-
-- Organised `[statusbar]` components into it's own sections.
-    - `[statusbar.component]` for the actual components to show in the statusbar and their order
-        - `[statusbar.component.mode]` for the interaction mode component settings
-        - `[statusbar.component.filename]` for the file name component settings
-        - `[statusbar.component.zoom]` for the zoom indicator component settings
-        - `[statusbar.component.pagenumber]` for the split indicator component settings
-        - `[statusbar.component.progress]` for the link hint indicator component settings
-
-- Ability to have configurable colors in the Color Dialog
-
-```toml
-[misc]
-color_dialog_colors = [ "#FF500055", "#FF000055"] # Can have any number of colors
-```
+- Removed the now-redundant `search_from_here` command.
+- Sessions and recent-pages data moved to the platform's standard app-data location.
+- LLM support removed (to be reintroduced later with a better implementation).
+- Removed unimplemented shell-scripts support.
+- `[statusbar]` components reorganized into their own `[statusbar.component.*]` subsections.
+- Color Dialog swatches are now configurable via `[misc].color_dialog_colors`.
 
 ## 0.6.9
 
