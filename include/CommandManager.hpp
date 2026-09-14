@@ -1,5 +1,8 @@
 #pragma once
 
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStringList>
 #include <functional>
 
@@ -89,6 +92,52 @@ public:
             m_commands[aliasName] = it->second;
     }
 
+    // Per-command usage counts, for smex-style "most frequently used first"
+    // sorting in CommandPicker (Config::CommandPalette::sort_by_frequency).
+    // Recorded only for commands picked through the command palette itself
+    // (CommandPicker::onItemAccepted) — not every invocation regardless of
+    // source — so the ranking reflects what you look up via the palette,
+    // not commands you already have a keybinding for.
+    inline void recordUsage(const QString &name) noexcept
+    {
+        ++m_usage_counts[name];
+    }
+
+    inline int usageCount(const QString &name) const noexcept
+    {
+        auto it = m_usage_counts.find(name);
+        return it != m_usage_counts.end() ? it->second : 0;
+    }
+
+    // Persist/restore usage counts across sessions (JSON: {"name": count}).
+    // Load failures (missing file, bad JSON) are silently treated as "no
+    // history yet" — there is nothing to recover, every count just starts
+    // at 0.
+    inline void loadUsageCounts(const QString &path) noexcept
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly))
+            return;
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (!doc.isObject())
+            return;
+        const QJsonObject obj = doc.object();
+        for (auto it = obj.constBegin(); it != obj.constEnd(); ++it)
+            m_usage_counts[it.key()] = it.value().toInt();
+    }
+
+    inline void saveUsageCounts(const QString &path) const noexcept
+    {
+        QJsonObject obj;
+        for (const auto &[name, count] : m_usage_counts)
+            obj[name] = count;
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return;
+        file.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    }
+
 private:
     Commands m_commands;
+    std::unordered_map<QString, int> m_usage_counts;
 };

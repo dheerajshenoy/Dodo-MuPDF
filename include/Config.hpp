@@ -1074,6 +1074,26 @@ struct Config
         // @default false
         // @added 0.6.5
         bool description = false;
+
+        // @desc Sort commands by how often you've picked them from the
+        // command palette (most-used first), smex-style. Usage counts
+        // persist across sessions when persist_frequency is on.
+        // @type bool
+        // @default true
+        // @added 0.7.8
+        bool sort_by_frequency = true;
+
+        // @desc Persist command-palette usage counts to disk
+        // (command_usage.json in the app data directory) so
+        // sort_by_frequency ranking survives across restarts. When off,
+        // usage is still tracked in-memory for the current session (so
+        // sort_by_frequency still works within one run) but nothing is
+        // loaded or saved to disk, and any previously saved history file
+        // is left untouched.
+        // @type bool
+        // @default true
+        // @added 0.7.8
+        bool persist_frequency = true;
     } command_palette;
     // @endsection
 

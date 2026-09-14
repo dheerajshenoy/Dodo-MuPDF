@@ -199,10 +199,12 @@ opacity     = 120
 # [command_palette]
 # -----------------------------------------------------------------------------
 [command_palette]
-description     = false
-vscrollbar      = true
-show_shortcuts  = true
-prompt          = "Command"
+description        = false
+vscrollbar          = true
+show_shortcuts      = true
+prompt              = "Command"
+sort_by_frequency   = true
+persist_frequency   = true
 
 
 # -----------------------------------------------------------------------------

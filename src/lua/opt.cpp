@@ -1412,6 +1412,19 @@ static const LuaField commandPaletteFields[] = {
     static_cast<Config::CommandPalette *>(p)->description = lua_toboolean(L, 3);
 }},
 
+    {"persist_frequency",
+     [](lua_State *L, P p)
+{
+    lua_pushboolean(
+        L, static_cast<Config::CommandPalette *>(p)->persist_frequency);
+    return 1;
+},
+     [](lua_State *L, P p)
+{
+    static_cast<Config::CommandPalette *>(p)->persist_frequency
+        = lua_toboolean(L, 3);
+}},
+
     {"prompt",
      [](lua_State *L, P p)
 {
@@ -1436,6 +1449,19 @@ static const LuaField commandPaletteFields[] = {
      [](lua_State *L, P p)
 {
     static_cast<Config::CommandPalette *>(p)->show_shortcuts
+        = lua_toboolean(L, 3);
+}},
+
+    {"sort_by_frequency",
+     [](lua_State *L, P p)
+{
+    lua_pushboolean(
+        L, static_cast<Config::CommandPalette *>(p)->sort_by_frequency);
+    return 1;
+},
+     [](lua_State *L, P p)
+{
+    static_cast<Config::CommandPalette *>(p)->sort_by_frequency
         = lua_toboolean(L, 3);
 }},
 

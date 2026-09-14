@@ -306,6 +306,8 @@ lektra.opt.highlight_search = {}
 ---@field vscrollbar boolean Show a vertical scrollbar in the command palette.
 ---@field show_shortcuts boolean Show keyboard shortcuts next to commands.
 ---@field description boolean Show command descriptions in the palette.
+---@field sort_by_frequency boolean Sort commands by how often you've picked them from the palette (most-used first, smex-style). Usage counts persist across sessions when persist_frequency is true.
+---@field persist_frequency boolean Persist command-palette usage counts to disk so sort_by_frequency ranking survives across restarts. When false, usage is still tracked for the current session but nothing is loaded/saved to disk.
 lektra.opt.command_palette = {}
 
 ---@class OptRendering

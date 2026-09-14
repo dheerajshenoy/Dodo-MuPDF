@@ -142,6 +142,10 @@ Lektra::Lektra(const QString &sessionName,
 
 Lektra::~Lektra() noexcept
 {
+    if (m_command_manager && m_config.command_palette.persist_frequency)
+        m_command_manager->saveUsageCounts(
+            m_app_data_dir.filePath("command_usage.json"));
+
     // Commands registered from Lua hold LuaRefGuard shared_ptrs that call
     // luaL_unref in their destructor. Reset before lua_close so the Lua state
     // is still alive when those destructors run.
@@ -779,6 +783,10 @@ Lektra::initDB() noexcept
     m_recent_files_store.setFilePath(recentf);
     if (!m_recent_files_store.load())
         qWarning() << "Failed to load recent files store";
+
+    if (m_command_manager && m_config.command_palette.persist_frequency)
+        m_command_manager->loadUsageCounts(
+            m_app_data_dir.filePath("command_usage.json"));
 }
 
 // Initialize the config related stuff
@@ -1260,6 +1268,10 @@ Lektra::initConfig() noexcept
         set(command_palette["show_shortcuts"],
             m_config.command_palette.show_shortcuts);
         set(command_palette["prompt"], m_config.command_palette.prompt);
+        set(command_palette["sort_by_frequency"],
+            m_config.command_palette.sort_by_frequency);
+        set(command_palette["persist_frequency"],
+            m_config.command_palette.persist_frequency);
     }
 
     // Markers
@@ -6338,9 +6350,9 @@ Lektra::Show_command_picker() noexcept
 {
     if (!m_command_picker)
     {
-        m_command_picker = new CommandPicker(m_config.command_palette,
-                                             m_command_manager->commands(),
-                                             m_config.keybinds, this);
+        m_command_picker = new CommandPicker(
+            m_config.command_palette, m_command_manager->commands(),
+            m_config.keybinds, m_command_manager.get(), this);
         m_command_picker->setKeybindings(m_picker_keybinds);
     }
 
